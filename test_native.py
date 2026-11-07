@@ -23,6 +23,32 @@ assert(legacy.destinations[0].genre == nil)
 let paired = try decode("[{\\"directory\\":\\"Tech-House\\",\\"genre\\":\\"Tech House\\"},{\\"directory\\":\\"Review\\"}]")
 assert(paired.destinations[0].genre == "Tech House")
 assert(paired.destinations[1].genre == nil)
+// Settings saves migrate legacy entries without losing optional values.
+let encoder = JSONEncoder()
+for config in [legacy, paired] {
+    let restored = try JSONDecoder().decode(Configuration.self, from: encoder.encode(config))
+    assert(restored.sourceFolder == "~/Downloads")
+    assert(restored.destinationRoot == "/music")
+    assert(restored.startAtThirtyPercent)
+    assert(restored.destinations.map(\\.directory) == config.destinations.map(\\.directory))
+    assert(restored.destinations.map(\\.genre) == config.destinations.map(\\.genre))
+}
+var customized = paired
+customized.sourceFolder = "/new/source"
+customized.destinationRoot = "/new/destinations"
+customized.startAtThirtyPercent = false
+let saved = try JSONDecoder().decode(Configuration.self, from: encoder.encode(customized))
+assert(saved.sourceFolder == customized.sourceFolder)
+assert(saved.destinationRoot == customized.destinationRoot)
+assert(!saved.startAtThirtyPercent)
+for pathKey in ["sourceFolder", "destinationRoot"] {
+    var json: [String: Any] = ["sourceFolder": "/source", "destinationRoot": "/music", "destinations": ["House"]]
+    json[pathKey] = "  "
+    do {
+        _ = try JSONDecoder().decode(Configuration.self, from: JSONSerialization.data(withJSONObject: json))
+        fatalError("Empty directory accepted")
+    } catch { }
+}
 for invalid in ["[]", "[\\"House\\",{\\"directory\\":\\"House\\"}]", "[\\"../bad\\"]", "[{\\"directory\\":\\"House\\",\\"genre\\":\\"  \\"}]"] {
     do { _ = try decode(invalid); fatalError("Invalid configuration accepted") }
     catch { }

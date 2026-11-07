@@ -20,7 +20,15 @@ Keep this folder and `.venv` in place: the app references its Python environment
 `config.json` contains your personal settings and is git-ignored, along with build
 outputs and dependencies. Commit `config.example.json` as the shareable template.
 The build copies that template to `config.json` only if no local config exists.
-Edit the local config and restart the app; no rebuild is needed.
+Open **Settings…** in the toolbar or app menu (**⌘,**) to choose the source and
+destination parent directories, add/remove up to nine destination folders, and
+edit each folder's Genre mapping. Rows are numbered in shortcut order; a blank
+Genre preserves the existing tag. You can also toggle the 30% preview start.
+**Save** writes `config.json` atomically and applies changes immediately; **Cancel**
+discards edits. Changing the configured source loads it without autoplay and
+replaces the previously remembered folder. Destination/Genre changes affect future
+moves only; existing files are not moved or retagged, and move undo remains available.
+You can still edit the local config manually and restart; no rebuild is needed.
 
 - `sourceFolder`: initial folder; defaults to `~/Downloads`. After choosing a folder,
   the app remembers it on this Mac.
@@ -46,6 +54,7 @@ Edit the local config and restart the app; no rebuild is needed.
 
 | Key | Action |
 | --- | --- |
+| ⌘, | Open Settings |
 | ⌘O | Choose any source folder (initially ~/Downloads) |
 | Enter / Space | Play/pause |
 | H / L or ← / → | Scrub backward/forward 5 seconds |
