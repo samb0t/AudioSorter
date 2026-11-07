@@ -1,10 +1,31 @@
 import Cocoa
 import AVFoundation
 
+struct Destination: Decodable {
+    var directory: String
+    var genre: String?
+
+    enum CodingKeys: String, CodingKey { case directory, genre }
+
+    init(from decoder: Decoder) throws {
+        if let name = try? decoder.singleValueContainer().decode(String.self) {
+            directory = name
+            genre = nil
+        } else {
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            directory = try values.decode(String.self, forKey: .directory)
+            genre = try values.decodeIfPresent(String.self, forKey: .genre)
+        }
+        if let genre, genre.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Genre must not be empty; omit it to preserve the existing genre."))
+        }
+    }
+}
+
 struct Configuration: Decodable {
     var sourceFolder: String = "~/Downloads"
     var destinationRoot: String
-    var destinations: [String]
+    var destinations: [Destination]
     var startAtThirtyPercent: Bool = true
 
     enum CodingKeys: String, CodingKey { case sourceFolder, destinationRoot, destinations, startAtThirtyPercent }
@@ -13,10 +34,11 @@ struct Configuration: Decodable {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         sourceFolder = try values.decodeIfPresent(String.self, forKey: .sourceFolder) ?? "~/Downloads"
         destinationRoot = try values.decode(String.self, forKey: .destinationRoot)
-        destinations = try values.decode([String].self, forKey: .destinations)
+        destinations = try values.decode([Destination].self, forKey: .destinations)
         startAtThirtyPercent = try values.decodeIfPresent(Bool.self, forKey: .startAtThirtyPercent) ?? true
-        guard !destinationRoot.isEmpty, (1...9).contains(destinations.count), Set(destinations).count == destinations.count,
-              destinations.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." && !$0.contains("/") }) else {
+        let directories = destinations.map(\.directory)
+        guard !destinationRoot.isEmpty, (1...9).contains(destinations.count), Set(directories).count == destinations.count,
+              directories.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." && !$0.contains("/") }) else {
             throw DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "Configure a destinationRoot and 1–9 unique destination folder names (no slashes)."))
         }
     }
@@ -28,7 +50,7 @@ struct Configuration: Decodable {
 
 final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate {
     var configuration: Configuration!
-    var names: [String] { configuration.destinations }
+    var names: [String] { configuration.destinations.map(\.directory) }
     var destinationRoot: URL { Configuration.expand(configuration.destinationRoot) }
     var files: [URL] = []
     var index = -1
@@ -36,7 +58,7 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
     var originalComment = ""
     var commentReadable = true
     var loading = false
-    var undoMoves: [(from: URL, to: URL)] = []
+    var undoMoves: [(from: URL, to: URL, genreRestore: [String: Any]?)] = []
     var monitor: Any?
     var timer: Timer?
     var window: NSWindow!
@@ -130,6 +152,7 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         destinations.distribution = .fillEqually
         for (i, name) in names.enumerated() {
             let b = button("\(i + 1)  \(name)", #selector(moveButton(_:)))
+            b.toolTip = configuration.destinations[i].genre.map { "Set Genre to \($0) and move" } ?? "Move without changing Genre"
             b.tag = i
             destinations.addArrangedSubview(b)
         }
@@ -382,6 +405,24 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
 
     @objc func moveButton(_ sender: NSButton) { move(sender.tag) }
 
+    // Move first so collisions cannot change tags. A failed atomic tag write rolls back the move.
+    func moveTaggedFile(from: URL, to: URL, change: [String: Any]?) throws -> [String: Any]? {
+        try FileManager.default.moveItem(at: from, to: to)
+        guard let change else { return nil }
+        do {
+            let input = try JSONSerialization.data(withJSONObject: change)
+            let result = try helper("write-genre", file: to, text: String(decoding: input, as: UTF8.self))
+            return ["restore": result["previous"] ?? NSNull()]
+        } catch {
+            let tagError = error
+            do { try FileManager.default.moveItem(at: to, to: from) }
+            catch {
+                throw NSError(domain: "AudioSorter", code: 4, userInfo: [NSLocalizedDescriptionKey: "Tag update failed: \(tagError.localizedDescription). Could not move the file back: \(error.localizedDescription). File remains at \(to.path). Reload the source folder after recovering it."])
+            }
+            throw tagError
+        }
+    }
+
     func move(_ destination: Int) {
         guard files.indices.contains(index), saveComment() else { return }
         let original = files[index]
@@ -396,8 +437,9 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         do {
             // FileManager refuses an existing target; never overwrite or auto-rename.
             try FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try FileManager.default.moveItem(at: original, to: target)
-            undoMoves.append((original, target))
+            let genre = configuration.destinations[destination].genre
+            let restore = try moveTaggedFile(from: original, to: target, change: genre.map { ["genre": $0] })
+            undoMoves.append((original, target, restore))
             let oldIndex = index
             files.remove(at: oldIndex)
             index = -1
@@ -409,7 +451,8 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
             if oldIndex < files.count { select(oldIndex, autoplay: true) }
             else { clear() }
             window.makeFirstResponder(table)
-            status.stringValue = "Moved to \(names[destination]). ⌘Z undoes the move.\(oldIndex >= files.count ? " End of list." : "")"
+            let tagged = genre.map { " Genre: \($0)." } ?? ""
+            status.stringValue = "Moved to \(names[destination]).\(tagged) ⌘Z undoes move/tag.\(oldIndex >= files.count ? " End of list." : "")"
         } catch {
             player?.currentTime = position
             if wasPlaying { player?.play() }
@@ -420,7 +463,7 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
     func undoMove() {
         guard let last = undoMoves.last, saveComment() else { return }
         do {
-            try FileManager.default.moveItem(at: last.to, to: last.from)
+            _ = try moveTaggedFile(from: last.to, to: last.from, change: last.genreRestore)
             undoMoves.removeLast()
             // Only add it to this queue if it belongs to the current source scope.
             if let source, last.from.deletingLastPathComponent() == source || (recursive.state == .on && last.from.path.hasPrefix(source.path + "/")) {

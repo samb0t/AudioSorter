@@ -5,9 +5,9 @@ import subprocess
 import tempfile
 import unittest
 
-from mutagen.id3 import COMM, ID3, TIT2
+from mutagen.id3 import COMM, ID3, TIT2, TCON
 
-from comments import read_comment, write_comment
+from comments import read_comment, write_comment, write_genre
 
 
 class CommentTests(unittest.TestCase):
@@ -62,6 +62,53 @@ class CommentTests(unittest.TestCase):
         self.assertEqual(self.path.read_bytes(), before)
         self.assertEqual(list(self.path.parent.glob(".audio-sorter-*")), [])
 
+    def test_genre_set_and_restore_multiple_values(self):
+        tags = ID3()
+        tags.add(TCON(encoding=1, text=["Old genre", "Another genre"]))
+        tags.add(TIT2(encoding=1, text=["Original title"]))
+        tags.save(self.path, v2_version=3)
+        persisted_text = list(ID3(self.path)["TCON"].text)
+        previous = write_genre(self.path, {"genre": "深い House"})
+        self.assertEqual(previous["text"], persisted_text)
+        self.assertEqual(ID3(self.path)["TCON"].text, ["深い House"])
+        self.assertEqual(ID3(self.path).version[1], 3)
+        write_comment(self.path, "Updated comment")
+        self.assertEqual(ID3(self.path)["TCON"].text, ["深い House"])
+        write_genre(self.path, {"restore": previous})
+        result = ID3(self.path)
+        self.assertEqual(result["TCON"].text, previous["text"])
+        self.assertEqual(int(result["TCON"].encoding), previous["encoding"])
+        self.assertEqual(str(result["TIT2"]), "Original title")
+        self.assertEqual(read_comment(self.path), "Updated comment")
+
+    def test_genre_undo_removes_previously_absent_frame(self):
+        previous = write_genre(self.path, {"genre": "House"})
+        self.assertIsNone(previous)
+        self.assertEqual(ID3(self.path).version[1], 4)
+        write_genre(self.path, {"restore": previous})
+        self.assertNotIn("TCON", ID3(self.path))
+
+    def test_genre_rejects_empty_and_symlink(self):
+        before = self.path.read_bytes()
+        for value in ["", "  ", None, 123]:
+            with self.assertRaises(ValueError):
+                write_genre(self.path, {"genre": value})
+        self.assertEqual(self.path.read_bytes(), before)
+        link = self.path.with_name("link.mp3")
+        link.symlink_to(self.path)
+        with self.assertRaises(ValueError):
+            write_genre(link, {"genre": "House"})
+        self.assertTrue(link.is_symlink())
+
+    def test_failed_genre_write_leaves_original_intact(self):
+        from unittest.mock import patch
+        before = self.path.read_bytes()
+        with patch("comments.ID3.save", side_effect=OSError("Disk error")):
+            with self.assertRaises(OSError):
+                write_genre(self.path, {"genre": "House"})
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(list(self.path.parent.glob(".audio-sorter-*")), [])
+
     @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg unavailable")
     def test_real_mp3_audio_unchanged(self):
         subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=1", "-y", str(self.path)], check=True)
@@ -72,6 +119,9 @@ class CommentTests(unittest.TestCase):
 
         before = audio_hash()
         write_comment(self.path, "Previewed at 30%; keep this one 🎵")
+        previous = write_genre(self.path, {"genre": "House"})
+        self.assertEqual(audio_hash(), before)
+        write_genre(self.path, {"restore": previous})
         self.assertEqual(audio_hash(), before)
         self.assertEqual(read_comment(self.path), "Previewed at 30%; keep this one 🎵")
 
