@@ -1,0 +1,6 @@
+{
+  "sourceFolder": "~/Downloads",
+  "destinationRoot": "~/Music/Sorted",
+  "destinations": ["Folder 1", "Folder 2", "Folder 3", "Folder 4", "Folder 5", "Folder 6"],
+  "startAtThirtyPercent": true
+}
