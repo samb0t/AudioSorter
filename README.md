@@ -36,9 +36,9 @@ Edit the local config and restart the app; no rebuild is needed.
 | --- | --- |
 | ⌘O | Choose any source folder (initially ~/Downloads) |
 | Enter / Space | Play/pause |
-| ← / → | Scrub 5 seconds |
-| Shift + ← / → | Scrub 30 seconds |
-| ↑ / ↓ | Select previous/next, without autoplay |
+| H / L or ← / → | Scrub backward/forward 5 seconds |
+| Shift + H / L or Shift + ← / → | Scrub backward/forward 30 seconds |
+| J / K or ↓ / ↑ | Select next/previous, without autoplay |
 | N | Save comment and preview next, without moving |
 | E | Edit embedded MP3 comment |
 | ⌘Enter / ⌘S | Save comment and return to sorting |

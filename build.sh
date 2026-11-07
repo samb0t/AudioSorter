@@ -5,6 +5,14 @@ APP="$ROOT/Audio Sorter.app"
 python3 -m venv "$ROOT/.venv"
 "$ROOT/.venv/bin/python" -m pip install --disable-pip-version-check -r "$ROOT/requirements.txt"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+ICONSET="$ROOT/.build/AudioSorter.iconset"
+mkdir -p "$ICONSET"
+for SIZE in 16 32 128 256 512; do
+  sips -z "$SIZE" "$SIZE" "$ROOT/icon-concept.png" --out "$ICONSET/icon_${SIZE}x${SIZE}.png" > /dev/null
+  DOUBLE=$((SIZE * 2))
+  sips -z "$DOUBLE" "$DOUBLE" "$ROOT/icon-concept.png" --out "$ICONSET/icon_${SIZE}x${SIZE}@2x.png" > /dev/null
+done
+iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AudioSorter.icns"
 if [ ! -f "$ROOT/config.json" ]; then
   cp "$ROOT/config.example.json" "$ROOT/config.json"
 fi
@@ -18,6 +26,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundleExecutable</key><string>AudioSorter</string>
 <key>CFBundleIdentifier</key><string>local.audio-sorter</string>
 <key>CFBundleName</key><string>Audio Sorter</string>
+<key>CFBundleIconFile</key><string>AudioSorter.icns</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>1.0</string>
 <key>NSHighResolutionCapable</key><true/>

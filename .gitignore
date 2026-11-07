@@ -1,4 +1,5 @@
 .venv/
+.build/
 *.app/
 config.json
 __pycache__/

@@ -86,7 +86,7 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         folderLabel.textColor = .secondaryLabelColor
         root.addArrangedSubview(folderLabel)
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("track"))
-        column.title = "MP3s — ↑ / ↓ select, Enter plays"
+        column.title = "MP3s — J / K or ↓ / ↑ select, Enter plays"
         table.addTableColumn(column)
         table.delegate = self
         table.dataSource = self
@@ -106,7 +106,7 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         let transport = NSStackView(views: [button("Play / pause  ↵", #selector(playPause)), slider, time])
         transport.spacing = 12
         root.addArrangedSubview(transport)
-        root.addArrangedSubview(NSTextField(labelWithString: "← / →  scrub 5s    •    Shift + ← / →  30s    •    N  preview next    •    E  edit comment"))
+        root.addArrangedSubview(NSTextField(labelWithString: "H / L or ← / →  scrub 5s    •    Shift  30s    •    J / K  down/up    •    N  next    •    E  comment"))
         let commentHeader = NSStackView(views: [NSTextField(labelWithString: "Embedded MP3 comment"), button("Save & return  ⌘↵", #selector(saveAndReturn))])
         commentHeader.spacing = 20
         root.addArrangedSubview(commentHeader)
@@ -200,6 +200,13 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         case 124: scrub(flags.contains(.shift) ? 30 : 5); return true
         case 125: select(index + 1, autoplay: false); return true
         case 126: select(index - 1, autoplay: false); return true
+        default: break
+        }
+        switch key {
+        case "h": scrub(flags.contains(.shift) ? -30 : -5); return true
+        case "l": scrub(flags.contains(.shift) ? 30 : 5); return true
+        case "j": select(index + 1, autoplay: false); return true
+        case "k": select(index - 1, autoplay: false); return true
         default: break
         }
         if key == "e" { window.makeFirstResponder(comment); return true }
