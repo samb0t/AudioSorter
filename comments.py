@@ -6,7 +6,7 @@ import shutil
 import sys
 import tempfile
 
-from mutagen.id3 import COMM, ID3, ID3NoHeaderError
+from mutagen.id3 import COMM, ID3, ID3NoHeaderError, TCON
 
 
 def tags_for(path):
@@ -38,6 +38,33 @@ def write_comment(path, text):
         del tags[old.HashKey]
     if text:
         tags.add(COMM(encoding=3, lang=lang, desc=desc, text=[text]))
+    save_tags(path, tags)
+
+
+def write_genre(path, change):
+    """Set a genre or restore its prior frame; return a JSON-safe undo snapshot."""
+    path = Path(path)
+    if path.is_symlink():
+        raise ValueError("Refusing to replace a symbolic link")
+    tags = tags_for(path)
+    old = tags.get("TCON")
+    previous = {"text": list(old.text), "encoding": int(old.encoding)} if old else None
+    if "genre" in change:
+        genre = change["genre"]
+        if not isinstance(genre, str) or not genre.strip():
+            raise ValueError("Genre must be a nonempty string")
+        replacement = TCON(encoding=3, text=[genre])
+    else:
+        restore = change["restore"]
+        replacement = TCON(encoding=restore["encoding"], text=restore["text"]) if restore is not None else None
+    tags.delall("TCON")
+    if replacement is not None:
+        tags.add(replacement)
+    save_tags(path, tags)
+    return previous
+
+
+def save_tags(path, tags):
     version = 3 if tags.version[1] == 3 else 4
     fd, temporary = tempfile.mkstemp(prefix=".audio-sorter-", suffix=".mp3", dir=path.parent)
     os.close(fd)
@@ -59,6 +86,9 @@ if __name__ == "__main__":
         elif action == "write":
             write_comment(path, sys.stdin.read())
             print(json.dumps({"ok": True}))
+        elif action == "write-genre":
+            previous = write_genre(path, json.load(sys.stdin))
+            print(json.dumps({"previous": previous}))
         else:
             raise ValueError("Unknown action")
     except Exception as error:
