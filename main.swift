@@ -1,7 +1,7 @@
 import Cocoa
 import AVFoundation
 
-struct Destination: Decodable {
+struct Destination: Codable {
     var directory: String
     var genre: String?
 
@@ -22,7 +22,7 @@ struct Destination: Decodable {
     }
 }
 
-struct Configuration: Decodable {
+struct Configuration: Codable {
     var sourceFolder: String = "~/Downloads"
     var destinationRoot: String
     var destinations: [Destination]
@@ -37,9 +37,11 @@ struct Configuration: Decodable {
         destinations = try values.decode([Destination].self, forKey: .destinations)
         startAtThirtyPercent = try values.decodeIfPresent(Bool.self, forKey: .startAtThirtyPercent) ?? true
         let directories = destinations.map(\.directory)
-        guard !destinationRoot.isEmpty, (1...9).contains(destinations.count), Set(directories).count == destinations.count,
-              directories.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." && !$0.contains("/") }) else {
-            throw DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "Configure a destinationRoot and 1–9 unique destination folder names (no slashes)."))
+        guard !sourceFolder.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !destinationRoot.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              (1...9).contains(destinations.count), Set(directories).count == destinations.count,
+              directories.allSatisfy({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0 != "." && $0 != ".." && !$0.contains("/") }) else {
+            throw DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "Source and destination parent directories are required. Configure 1–9 unique destination folder names (no slashes, . or ..)."))
         }
     }
 
@@ -71,12 +73,17 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
     let comment = NSTextView()
     let recursive = NSButton(checkboxWithTitle: "Include subfolders", target: nil, action: nil)
     var source: URL?
+    var configurationURL: URL!
+    var settingsController: SettingsController?
+    let destinationButtons = NSStackView()
+    let destinationHelp = NSTextField(labelWithString: "")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         makeMenu()
         do {
             let path = try String(contentsOf: Bundle.main.resourceURL!.appendingPathComponent("config-path"), encoding: .utf8)
-            configuration = try JSONDecoder().decode(Configuration.self, from: Data(contentsOf: URL(fileURLWithPath: path)))
+            configurationURL = URL(fileURLWithPath: path)
+            configuration = try JSONDecoder().decode(Configuration.self, from: Data(contentsOf: configurationURL))
         } catch {
             NSAlert(error: NSError(domain: "AudioSorter", code: 3, userInfo: [NSLocalizedDescriptionKey: "Cannot load config.json: \(error.localizedDescription)"])).runModal()
             NSApp.terminate(nil)
@@ -101,7 +108,7 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         let open = button("Open folder…  ⌘O", #selector(chooseFolder))
         recursive.target = self
         recursive.action = #selector(reloadFolder)
-        let toolbar = NSStackView(views: [open, recursive])
+        let toolbar = NSStackView(views: [open, recursive, button("Settings…", #selector(showSettings))])
         toolbar.spacing = 18
         root.addArrangedSubview(toolbar)
         folderLabel.lineBreakMode = .byTruncatingMiddle
@@ -147,17 +154,12 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         commentScroll.borderType = .bezelBorder
         root.addArrangedSubview(commentScroll)
         commentScroll.heightAnchor.constraint(equalToConstant: 90).isActive = true
-        let destinations = NSStackView()
+        let destinations = destinationButtons
         destinations.spacing = 6
         destinations.distribution = .fillEqually
-        for (i, name) in names.enumerated() {
-            let b = button("\(i + 1)  \(name)", #selector(moveButton(_:)))
-            b.toolTip = configuration.destinations[i].genre.map { "Set Genre to \($0) and move" } ?? "Move without changing Genre"
-            b.tag = i
-            destinations.addArrangedSubview(b)
-        }
+        refreshDestinations()
         root.addArrangedSubview(destinations)
-        root.addArrangedSubview(NSTextField(labelWithString: "1–\(names.count)  MOVE + play next    •    ⌘number  save + move from editor    •    ⌘Z  undo move"))
+        root.addArrangedSubview(destinationHelp)
         status.textColor = .secondaryLabelColor
         status.lineBreakMode = .byTruncatingMiddle
         root.addArrangedSubview(status)
@@ -184,6 +186,9 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         let appItem = NSMenuItem()
         menu.addItem(appItem)
         let appMenu = NSMenu()
+        let settings = appMenu.addItem(withTitle: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
+        settings.target = self
+        appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Quit Audio Sorter", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
         let edit = NSMenuItem()
@@ -197,6 +202,43 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
     }
 
     var editing: Bool { window.firstResponder === comment }
+
+    func refreshDestinations() {
+        for view in destinationButtons.arrangedSubviews {
+            destinationButtons.removeArrangedSubview(view)
+            view.removeFromSuperview()
+        }
+        for (i, name) in names.enumerated() {
+            let b = button("\(i + 1)  \(name)", #selector(moveButton(_:)))
+            b.toolTip = configuration.destinations[i].genre.map { "Set Genre to \($0) and move" } ?? "Move without changing Genre"
+            b.tag = i
+            destinationButtons.addArrangedSubview(b)
+        }
+        destinationHelp.stringValue = "1–\(names.count)  MOVE + play next    •    ⌘number  save + move from editor    •    ⌘Z  undo move"
+    }
+
+    @objc func showSettings() {
+        if settingsController == nil { settingsController = SettingsController(sorter: self) }
+        settingsController?.present()
+    }
+
+    func applySettings(_ updated: Configuration) throws -> Bool {
+        guard saveComment() else { return false }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        try encoder.encode(updated).write(to: configurationURL, options: .atomic)
+        let sourceChanged = configuration.sourceFolder != updated.sourceFolder
+        configuration = updated
+        refreshDestinations()
+        if sourceChanged {
+            // A configured source takes precedence over the last ad-hoc folder, even after restart.
+            UserDefaults.standard.removeObject(forKey: "source")
+            loadFolder(Configuration.expand(updated.sourceFolder), autoplay: false)
+        } else {
+            status.stringValue = "Settings saved. Destination and genre changes apply to future moves."
+        }
+        return true
+    }
 
     func handle(_ event: NSEvent) -> Bool {
         guard NSApp.modalWindow == nil, event.window === window else { return false }
@@ -501,6 +543,170 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
     func windowShouldClose(_ sender: NSWindow) -> Bool { saveComment() }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply { saveComment() ? .terminateNow : .terminateCancel }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+}
+
+final class SettingsController: NSWindowController {
+    unowned let sorter: Sorter
+    let sourceField = NSTextField(string: "")
+    let rootField = NSTextField(string: "")
+    let rows = NSStackView()
+    let add = NSButton(title: "Add destination", target: nil, action: nil)
+    let preview = NSButton(checkboxWithTitle: "Start newly loaded tracks at 30%", target: nil, action: nil)
+
+    init(sorter: Sorter) {
+        self.sorter = sorter
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 720), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        super.init(window: window)
+        window.title = "Audio Sorter Settings"
+        window.isReleasedWhenClosed = false
+        let content = NSStackView()
+        content.orientation = .vertical
+        content.alignment = .leading
+        content.spacing = 12
+        content.translatesAutoresizingMaskIntoConstraints = false
+        window.contentView!.addSubview(content)
+        NSLayoutConstraint.activate([
+            content.leadingAnchor.constraint(equalTo: window.contentView!.leadingAnchor, constant: 24),
+            content.trailingAnchor.constraint(equalTo: window.contentView!.trailingAnchor, constant: -24),
+            content.topAnchor.constraint(equalTo: window.contentView!.topAnchor, constant: 24),
+            content.bottomAnchor.constraint(lessThanOrEqualTo: window.contentView!.bottomAnchor, constant: -24)
+        ])
+        for (label, field, action) in [("Source directory", sourceField, #selector(browseSource)), ("Destination parent directory", rootField, #selector(browseRoot))] {
+            content.addArrangedSubview(NSTextField(labelWithString: label))
+            let browse = NSButton(title: "Choose…", target: self, action: action)
+            let line = NSStackView(views: [field, browse])
+            line.spacing = 8
+            content.addArrangedSubview(line)
+            line.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
+        }
+        content.addArrangedSubview(NSTextField(labelWithString: "Destinations / genre mapping (in keyboard shortcut order)"))
+        let hint = NSTextField(wrappingLabelWithString: "Folders are created inside the destination parent. Leave Genre blank to preserve the existing tag. Changes affect future moves only.")
+        hint.textColor = .secondaryLabelColor
+        content.addArrangedSubview(hint)
+        hint.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
+        rows.orientation = .vertical
+        rows.alignment = .leading
+        rows.spacing = 6
+        content.addArrangedSubview(rows)
+        rows.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
+        add.target = self
+        add.action = #selector(addDestination)
+        content.addArrangedSubview(add)
+        content.addArrangedSubview(preview)
+        let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancelSettings))
+        cancel.keyEquivalent = "\u{1b}"
+        let save = NSButton(title: "Save", target: self, action: #selector(saveSettings))
+        save.keyEquivalent = "\r"
+        let actions = NSStackView(views: [cancel, save])
+        actions.spacing = 8
+        content.addArrangedSubview(actions)
+        actions.trailingAnchor.constraint(equalTo: content.trailingAnchor).isActive = true
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func present() {
+        if window?.isVisible != true {
+            sourceField.stringValue = sorter.configuration.sourceFolder
+            rootField.stringValue = sorter.configuration.destinationRoot
+            preview.state = sorter.configuration.startAtThirtyPercent ? .on : .off
+            for row in rows.arrangedSubviews { rows.removeArrangedSubview(row); row.removeFromSuperview() }
+            for destination in sorter.configuration.destinations { appendRow(directory: destination.directory, genre: destination.genre ?? "") }
+            window?.center()
+        }
+        showWindow(nil)
+        window?.makeKeyAndOrderFront(nil)
+    }
+
+    func appendRow(directory: String = "", genre: String = "") {
+        let number = NSTextField(labelWithString: "")
+        number.widthAnchor.constraint(equalToConstant: 20).isActive = true
+        let directoryField = NSTextField(string: directory)
+        directoryField.placeholderString = "Destination folder name"
+        let genreField = NSTextField(string: genre)
+        genreField.placeholderString = "Genre (preserve if blank)"
+        let remove = NSButton(title: "−", target: self, action: #selector(removeDestination(_:)))
+        remove.toolTip = "Remove destination"
+        let row = NSStackView(views: [number, directoryField, genreField, remove])
+        row.spacing = 8
+        rows.addArrangedSubview(row)
+        row.widthAnchor.constraint(equalTo: rows.widthAnchor).isActive = true
+        directoryField.widthAnchor.constraint(equalTo: genreField.widthAnchor).isActive = true
+        updateRows()
+    }
+
+    func updateRows() {
+        for (index, row) in rows.arrangedSubviews.enumerated() {
+            guard let row = row as? NSStackView else { continue }
+            (row.arrangedSubviews[0] as? NSTextField)?.stringValue = "\(index + 1)"
+            (row.arrangedSubviews[3] as? NSButton)?.isEnabled = rows.arrangedSubviews.count > 1
+        }
+        add.isEnabled = rows.arrangedSubviews.count < 9
+    }
+
+    @objc func addDestination() {
+        guard rows.arrangedSubviews.count < 9 else { return }
+        appendRow()
+    }
+
+    @objc func removeDestination(_ sender: NSButton) {
+        guard rows.arrangedSubviews.count > 1, let row = sender.superview as? NSStackView else { return }
+        rows.removeArrangedSubview(row)
+        row.removeFromSuperview()
+        updateRows()
+    }
+
+    func browse(_ field: NSTextField) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.directoryURL = Configuration.expand(field.stringValue)
+        panel.beginSheetModal(for: window!) { response in
+            if response == .OK, let url = panel.url { field.stringValue = url.path }
+        }
+    }
+
+    @objc func browseSource() { browse(sourceField) }
+    @objc func browseRoot() { browse(rootField) }
+    @objc func cancelSettings() { close() }
+
+    @objc func saveSettings() {
+        func trimmed(_ field: NSTextField) -> String { field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) }
+        do {
+            let destinations: [[String: String]] = rows.arrangedSubviews.compactMap { view in
+                guard let row = view as? NSStackView,
+                      let directory = row.arrangedSubviews[1] as? NSTextField,
+                      let genre = row.arrangedSubviews[2] as? NSTextField else { return nil }
+                var entry = ["directory": trimmed(directory)]
+                if !trimmed(genre).isEmpty { entry["genre"] = trimmed(genre) }
+                return entry
+            }
+            let data = try JSONSerialization.data(withJSONObject: [
+                "sourceFolder": trimmed(sourceField), "destinationRoot": trimmed(rootField),
+                "destinations": destinations, "startAtThirtyPercent": preview.state == .on
+            ])
+            let updated = try JSONDecoder().decode(Configuration.self, from: data)
+            for path in [updated.sourceFolder, updated.destinationRoot] {
+                let expanded = (path as NSString).expandingTildeInPath
+                guard (expanded as NSString).isAbsolutePath else {
+                    throw NSError(domain: "AudioSorter", code: 5, userInfo: [NSLocalizedDescriptionKey: "Choose an absolute directory path or a path starting with ~/."])
+                }
+            }
+            let values = try Configuration.expand(updated.sourceFolder).resourceValues(forKeys: [.isDirectoryKey, .isReadableKey])
+            guard values.isDirectory == true, values.isReadable == true else {
+                throw NSError(domain: "AudioSorter", code: 5, userInfo: [NSLocalizedDescriptionKey: "The source must be an existing, readable directory."])
+            }
+            if try sorter.applySettings(updated) { close() }
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "Cannot save settings"
+            if let error = error as? DecodingError, case .dataCorrupted(let context) = error {
+                alert.informativeText = context.debugDescription
+            } else { alert.informativeText = error.localizedDescription }
+            alert.beginSheetModal(for: window!)
+        }
+    }
 }
 
 let app = NSApplication.shared
