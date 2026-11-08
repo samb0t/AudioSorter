@@ -305,11 +305,11 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
         if flags.contains(.command) {
-            if editing, !flags.contains(.shift), !flags.contains(.option), !flags.contains(.control), key == "j" || key == "k" {
+            if !flags.contains(.shift), !flags.contains(.option), !flags.contains(.control), key == "j" || key == "k" {
                 select(index + (key == "j" ? 1 : -1), autoplay: false)
                 return true
             }
-            if editing, !flags.contains(.option), !flags.contains(.control), key == "h" || key == "l" {
+            if !flags.contains(.option), !flags.contains(.control), key == "h" || key == "l" {
                 let seconds: Double = flags.contains(.shift) ? 30 : 5
                 scrub(key == "h" ? -seconds : seconds)
                 return true

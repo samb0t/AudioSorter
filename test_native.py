@@ -8,7 +8,7 @@ import unittest
 
 @unittest.skipUnless(shutil.which("swift"), "Swift unavailable")
 class NativeTests(unittest.TestCase):
-    def test_comment_scrub_shortcuts(self):
+    def test_command_playback_shortcuts_in_both_focus_states(self):
         source = Path(__file__).with_name("main.swift").read_text()
         command = source.split("        if flags.contains(.command) {", 1)[1].split("            if let number = Int(key)", 1)[0]
         harness = '''
@@ -35,9 +35,20 @@ assert(offsets == [-5, 5, -30, 30])
 assert(handle("j", flags: [.command]))
 assert(handle("k", flags: [.command]))
 assert(selections == [3, 1])
+for editing in [false, true] {
+    offsets = []
+    selections = []
+    assert(handle("h", flags: [.command], editing: editing))
+    assert(handle("l", flags: [.command], editing: editing))
+    assert(handle("h", flags: [.command, .shift], editing: editing))
+    assert(handle("l", flags: [.command, .shift], editing: editing))
+    assert(handle("j", flags: [.command], editing: editing))
+    assert(handle("k", flags: [.command], editing: editing))
+    assert(offsets == [-5, 5, -30, 30])
+    assert(selections == [3, 1])
+}
 for key in ["j", "k"] {
     assert(!handle(key, flags: []))
-    assert(!handle(key, flags: [.command], editing: false))
     assert(!handle(key, flags: [.command, .shift]))
     assert(!handle(key, flags: [.command, .option]))
     assert(!handle(key, flags: [.command, .control]))
@@ -45,7 +56,6 @@ for key in ["j", "k"] {
 assert(selections == [3, 1])
 for key in ["h", "l"] {
     assert(!handle(key, flags: []))
-    assert(!handle(key, flags: [.command], editing: false))
     assert(!handle(key, flags: [.command, .option]))
     assert(!handle(key, flags: [.command, .control]))
 }
