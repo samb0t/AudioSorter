@@ -56,9 +56,14 @@ You can still edit the local config manually and restart; no rebuild is needed.
 | --- | --- |
 | ⌘, | Open Settings |
 | ⌘O | Choose any source folder (initially ~/Downloads) |
+| ⌘R | Refresh the file list after changes in Finder (also works while editing comments) |
+| ⌘⇧R | Show the current MP3 in Finder |
 | Enter / Space | Play/pause |
 | H / L or ← / → | Scrub backward/forward 5 seconds |
 | Shift + H / L or Shift + ← / → | Scrub backward/forward 30 seconds |
+| ⌘H / ⌘L, while editing comments | Scrub backward/forward 5 seconds |
+| ⌘⇧H / ⌘⇧L, while editing comments | Scrub backward/forward 30 seconds |
+| ⌘J / ⌘K, while editing comments | Save comment and select next/previous track, without autoplay; keep editing |
 | J / K or ↓ / ↑ | Select next/previous, without autoplay |
 | N | Save comment and preview next, without moving |
 | E | Edit embedded MP3 comment |
@@ -70,12 +75,24 @@ You can still edit the local config manually and restart; no rebuild is needed.
 
 Plain numbers and playback keys type normally in the comment editor. Use ⌘number
 to move directly from the editor, or leave it with ⌘Enter and use plain numbers.
+While editing comments, ⌘H scrubs backward instead of hiding the app; these scrub
+shortcuts keep the editor focused and leave unsaved text unchanged.
 Clicking a destination also saves edits.
+Use **Show in Finder** in the toolbar or File menu to reveal the current MP3, or
+right-click a list item to reveal that file without changing tracks. This does not
+move files, change playback, or save pending comment edits.
 Changing track, folder, or quitting saves pending comments. Moving automatically
 plays the next track. At the end, playback stops; it does not wrap around.
 
-Only MP3s are listed. Subfolders are opt-in. Symbolic links are excluded. Existing
-destination files are never overwritten; a collision displays an error and leaves
+Only MP3s are listed. Subfolders are opt-in. Symbolic links are excluded.
+Rescan with **Refresh** beside the source path or in the File menu.
+Refresh saves pending comments, then picks up additions, removals, and renames.
+If the current file's path remains listed, selection and playback position are
+preserved; otherwise the first remaining track is selected without autoplay.
+If saving a comment fails (for example, its file was moved in Finder), refresh is
+cancelled so unsaved text stays available. Refresh is manual, not a folder watcher.
+
+Existing destination files are never overwritten; a collision displays an error and leaves
 the original in place. A failed Genre write rolls back the move; if rollback also
 fails, the error reports the remaining file location for recovery. Move undo is
 session-only, restores the previous Genre (including an absent Genre), and does not
