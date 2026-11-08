@@ -29,7 +29,8 @@ Genre preserves the existing tag. You can also toggle the 30% preview start.
 **Save** writes `config.json` atomically and applies changes immediately; **Cancel**
 discards edits. Changing the configured source loads it without autoplay and
 replaces the previously remembered folder. Destination/Genre changes affect future
-moves only; existing files are not moved or retagged, and move undo remains available.
+moves and explicitly confirmed missing-Genre repairs only; existing files are not
+automatically moved or retagged, and move undo remains available.
 You can still edit the local config manually and restart; no rebuild is needed.
 
 - `sourceFolder`: initial folder; defaults to `~/Downloads`. After choosing a folder,
@@ -182,7 +183,36 @@ file. Select an issue and click **Show in Finder**; if its path is missing, Find
 reveals the nearest existing parent. **Check again** uses the latest settings.
 Results are a snapshot: check again after sorting, editing tags, or changing
 settings. This checks consistency with your rules, not the musical genre itself.
-There are no automatic fixes.
+Scanning remains read-only. **Fix selected missing Genres…** is enabled when the
+selection contains eligible missing-Genre findings (multiple selection is supported).
+Only those eligible rows are included, even in a mixed selection. The confirmation
+lists every affected file and intended Genre, with **Cancel** as the default.
+Repairs include nested folders and fill absent or empty Genre fields only; whitespace
+or any other nonempty Genre is never replaced. Mismatches, WAV RIFF/ID3 conflicts
+(including ID3-only WAV Genres), malformed/unreadable metadata, and missing
+directories remain report-only. Repairs never create directories or move files.
+
+The separate background write operation rechecks the current on-disk configuration,
+file identity/content snapshot, path containment, symlinks, and current tags before
+each write and again before atomic replacement. Stale findings or changed mappings
+are skipped. MP3/AIFF use ID3 `TCON`; WAV uses RIFF INFO `IGNR` and synchronizes an
+existing empty ID3 Genre. The same lossless, verified same-directory writer used by
+sorting preserves audio payloads, artwork, DJ metadata, and unrelated frames/chunks;
+audio is never re-encoded. Existing WAV ASCII-only and unsupported-layout limits apply.
+
+While repairs run, sorting, comment saves, Trash, move undo, settings saves, and
+track/folder changes that would save comments are temporarily blocked. Playback
+controls remain available, and repairs do not save/discard pending text, change the
+current track/selection, or restart playback. A second repair cannot run concurrently.
+Per-file successes, skips, and failures remain in the results window beneath the
+fresh read-only scan, which uses current settings. A failed file does not stop the rest.
+
+**Repair undo:** there is no app undo for these explicit repairs; keep backups.
+Repairs neither add to nor clear/change the existing move/Genre undo stack. Undo Move
+still restores that move's original Genre state, even if a later repair filled it.
+Automated temporary-fixture repair tests cover all supported extensions, preservation,
+stale findings, and write coordination. No manual Rekordbox import or Reload Tag
+verification was performed for this feature; disposable-copy checks remain required.
 
 ## TODO
 
@@ -196,11 +226,11 @@ There are no automatic fixes.
   unknown/DJ atoms, and chunk-offset-safe writes need separate design and tests.
   AAC versus ALAC playback/tag compatibility must be checked independently.
   Neither FLAC nor M4A support is approved or included in this change.
-- [ ] Add **Fix selected** to the destination tag checker: after explicit
-  confirmation, apply the configured Genre to selected missing/mismatched tag
-  findings. Revalidate paths and mappings before writing, preserve other tags
-  and audio, report per-file failures, and refresh the results. Keep missing
-  directories and unreadable files as report-only findings.
+- [x] Add **Fix selected missing Genres…** to the destination tag checker with
+  explicit per-file/Genre confirmation, nested-folder support, stale path/mapping/tag
+  revalidation, lossless writes, mutation coordination, per-file reporting, and rescan.
+  Missing tags only; mismatches, conflicts, malformed/unreadable metadata, and missing
+  directories remain report-only. No repair undo; move/Genre undo history is unchanged.
 
 ## Tests
 
