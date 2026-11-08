@@ -132,6 +132,9 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         trackMenu.delegate = self
         let reveal = trackMenu.addItem(withTitle: "Show in Finder", action: #selector(showInFinder(_:)), keyEquivalent: "")
         reveal.target = self
+        trackMenu.addItem(.separator())
+        let trash = trackMenu.addItem(withTitle: "Move to Trash…", action: #selector(confirmTrash(_:)), keyEquivalent: "")
+        trash.target = self
         table.menu = trackMenu
         let list = NSScrollView()
         list.documentView = table
@@ -211,9 +214,13 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         let reveal = fileMenu.addItem(withTitle: "Show in Finder", action: #selector(showInFinder(_:)), keyEquivalent: "r")
         reveal.keyEquivalentModifierMask = [.command, .shift]
         reveal.target = self
+        let trash = fileMenu.addItem(withTitle: "Move to Trash…", action: #selector(confirmTrash(_:)), keyEquivalent: "\u{8}")
+        trash.target = self
         fileMenu.addItem(.separator())
         let lint = fileMenu.addItem(withTitle: "Check destination tags…", action: #selector(checkDestinationTags), keyEquivalent: "")
         lint.target = self
+        fileMenu.addItem(.separator())
+        fileMenu.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         file.submenu = fileMenu
         let edit = NSMenuItem()
         menu.addItem(edit)
@@ -228,15 +235,17 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
     var editing: Bool { window.firstResponder === comment }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
-        guard menu === table.menu, let item = menu.items.first else { return }
-        item.representedObject = files.indices.contains(table.clickedRow) ? files[table.clickedRow] : nil
+        guard menu === table.menu else { return }
+        for item in menu.items where !item.isSeparatorItem {
+            item.representedObject = files.indices.contains(table.clickedRow) ? files[table.clickedRow] : nil
+        }
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         if menuItem.action == #selector(refreshFolder) {
             return window?.isKeyWindow == true && NSApp.modalWindow == nil && source != nil
         }
-        guard menuItem.action == #selector(showInFinder(_:)) else { return true }
+        guard menuItem.action == #selector(showInFinder(_:)) || menuItem.action == #selector(confirmTrash(_:)) else { return true }
         guard window?.isKeyWindow == true, NSApp.modalWindow == nil else { return false }
         if menuItem.menu === table.menu { return menuItem.representedObject is URL }
         return files.indices.contains(index)
@@ -316,6 +325,10 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
             }
             if let number = Int(key), (1...names.count).contains(number), !flags.contains(.shift), !flags.contains(.option), !flags.contains(.control) {
                 if !event.isARepeat { move(number - 1) }
+                return true
+            }
+            if event.keyCode == 51, !flags.contains(.shift), !flags.contains(.option), !flags.contains(.control) {
+                if !event.isARepeat { confirmTrash(nil) }
                 return true
             }
             if key == "o" { chooseFolder(); return true }
@@ -528,6 +541,68 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
     }
 
     @objc func moveButton(_ sender: NSButton) { move(sender.tag) }
+
+    @objc func confirmTrash(_ sender: Any?) {
+        guard window.isKeyWindow, NSApp.modalWindow == nil else { return }
+        let url: URL
+        if let item = sender as? NSMenuItem, item.menu === table.menu {
+            guard let clickedURL = item.representedObject as? URL else { return }
+            url = clickedURL
+        } else {
+            guard files.indices.contains(index) else { return }
+            url = files[index]
+        }
+        guard files.contains(url) else { return }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Move “\(url.lastPathComponent)” to Trash?"
+        alert.informativeText = "\(url.path)\n\nYou can recover it from Trash in Finder. This cannot be undone with the app’s Undo Move command. Any pending comment on this track will be saved first."
+        alert.addButton(withTitle: "Cancel").keyEquivalent = "\r"
+        let confirm = alert.addButton(withTitle: "Move to Trash")
+        confirm.keyEquivalent = ""
+        confirm.hasDestructiveAction = true
+        guard alert.runModal() == .alertSecondButtonReturn else { return }
+        _ = trashFile(url)
+    }
+
+    func sendToTrash(_ url: URL) throws {
+        try FileManager.default.trashItem(at: url, resultingItemURL: nil)
+    }
+
+    @discardableResult func trashFile(_ url: URL) -> Bool {
+        guard let removedIndex = files.firstIndex(of: url) else { return false }
+        let current = files.indices.contains(index) ? files[index] : nil
+        let deletingCurrent = current == url
+        do {
+            let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+            guard values.isRegularFile == true, values.isSymbolicLink != true else {
+                throw NSError(domain: "AudioSorter", code: 7, userInfo: [NSLocalizedDescriptionKey: "Refusing to trash a non-regular file or symbolic link. Refresh the source folder."])
+            }
+            if deletingCurrent && !saveComment() { return false }
+            let wasPlaying = player?.isPlaying ?? false
+            // Do not stop playback or alter the queue until Trash succeeds.
+            try sendToTrash(url)
+            files.remove(at: removedIndex)
+            if deletingCurrent {
+                player?.stop()
+                player = nil
+                index = -1
+                originalComment = ""
+                comment.string = ""
+            } else {
+                index = current.flatMap { files.firstIndex(of: $0) } ?? -1
+            }
+            loading = true
+            table.reloadData()
+            loading = false
+            if deletingCurrent {
+                if files.isEmpty { clear() }
+                else { select(min(removedIndex, files.count - 1), autoplay: wasPlaying) }
+            } else { highlight() }
+            status.stringValue = "Moved \(url.lastPathComponent) to Trash. Recover it in Finder; ⌘Z only undoes sorting moves."
+            return true
+        } catch { report(error); return false }
+    }
 
     // Move first so collisions cannot change tags. A failed atomic tag write rolls back the move.
     func moveTaggedFile(from: URL, to: URL, change: [String: Any]?) throws -> [String: Any]? {

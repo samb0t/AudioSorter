@@ -55,9 +55,11 @@ You can still edit the local config manually and restart; no rebuild is needed.
 | Key | Action |
 | --- | --- |
 | ⌘, | Open Settings |
+| ⌘W | Close the focused window (closing Settings discards unsaved settings) |
 | ⌘O | Choose any source folder (initially ~/Downloads) |
 | ⌘R | Refresh the file list after changes in Finder (also works while editing comments) |
 | ⌘⇧R | Show the current MP3 in Finder |
+| ⌘Delete | Move the current MP3 to Trash, after confirmation (also while editing comments) |
 | Enter / Space | Play/pause |
 | H / L or ← / → | Scrub backward/forward 5 seconds |
 | Shift + H / L or Shift + ← / → | Scrub backward/forward 30 seconds |
@@ -82,6 +84,14 @@ Clicking a destination also saves edits.
 Use **Show in Finder** in the toolbar or File menu to reveal the current MP3, or
 right-click a list item to reveal that file without changing tracks. This does not
 move files, change playback, or save pending comment edits.
+**Move to Trash…** is available in the File menu and by right-clicking a list item.
+It always asks for confirmation, with Cancel as the default. Right-click targets
+that item, not necessarily the current track. Pending comments on a track being
+trashed are saved first; a save or Trash failure leaves it in the queue. Deleting
+another track preserves the current track and its unsaved comments. Deleting the
+current track selects the next (or previous at the end) and continues playback
+only if it was already playing. Recover trashed files in Finder; the app’s Undo
+Move command does not undo deletion. Plain Delete still edits text normally.
 Changing track, folder, or quitting saves pending comments. Moving automatically
 plays the next track. At the end, playback stops; it does not wrap around.
 
