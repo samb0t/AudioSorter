@@ -8,6 +8,113 @@ import unittest
 
 @unittest.skipUnless(shutil.which("swift"), "Swift unavailable")
 class NativeTests(unittest.TestCase):
+    def test_comment_scrub_shortcuts(self):
+        source = Path(__file__).with_name("main.swift").read_text()
+        command = source.split("        if flags.contains(.command) {", 1)[1].split("            if let number = Int(key)", 1)[0]
+        harness = '''
+import Cocoa
+var offsets: [Double] = []
+var selections: [Int] = []
+let index = 2
+func select(_ newIndex: Int, autoplay: Bool) {
+    assert(!autoplay)
+    selections.append(newIndex)
+}
+func scrub(_ seconds: Double) { offsets.append(seconds) }
+func handle(_ key: String, flags: NSEvent.ModifierFlags, editing: Bool = true) -> Bool {
+    if flags.contains(.command) {
+        COMMAND
+    }
+    return false
+}
+assert(handle("h", flags: [.command]))
+assert(handle("l", flags: [.command]))
+assert(handle("h", flags: [.command, .shift]))
+assert(handle("l", flags: [.command, .shift]))
+assert(offsets == [-5, 5, -30, 30])
+assert(handle("j", flags: [.command]))
+assert(handle("k", flags: [.command]))
+assert(selections == [3, 1])
+for key in ["j", "k"] {
+    assert(!handle(key, flags: []))
+    assert(!handle(key, flags: [.command], editing: false))
+    assert(!handle(key, flags: [.command, .shift]))
+    assert(!handle(key, flags: [.command, .option]))
+    assert(!handle(key, flags: [.command, .control]))
+}
+assert(selections == [3, 1])
+for key in ["h", "l"] {
+    assert(!handle(key, flags: []))
+    assert(!handle(key, flags: [.command], editing: false))
+    assert(!handle(key, flags: [.command, .option]))
+    assert(!handle(key, flags: [.command, .control]))
+}
+assert(!handle("s", flags: [.command]))
+assert(offsets == [-5, 5, -30, 30])
+'''.replace("COMMAND", command)
+        with tempfile.TemporaryDirectory() as directory:
+            script = Path(directory) / "main.swift"
+            script.write_text(harness)
+            result = subprocess.run(["swift", str(script)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_show_in_finder(self):
+        source = Path(__file__).with_name("main.swift").read_text()
+        reveal = source.split("    @objc func showInFinder(", 1)[1].split("    func refreshDestinations()", 1)[0]
+        harness = '''
+class Menu {}
+class NSMenuItem {
+    var menu: Menu?
+    var representedObject: Any?
+}
+class Workspace {
+    static let shared = Workspace()
+    var revealed: [URL] = []
+    func activateFileViewerSelecting(_ urls: [URL]) { revealed = urls }
+}
+class Revealer {
+    var files: [URL] = []
+    var index = -1
+    let table = Table()
+    var errors = 0
+    func report(_ error: Error) { errors += 1 }
+    REVEAL_FUNCTION
+}
+class Table { let menu: Menu? = Menu() }
+let root = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
+let first = root.appendingPathComponent("first track.mp3")
+let second = root.appendingPathComponent("second.mp3")
+try Data().write(to: first)
+try Data().write(to: second)
+let revealer = Revealer()
+revealer.showInFinder(nil)
+assert(Workspace.shared.revealed.isEmpty)
+revealer.files = [first, second]
+revealer.index = 0
+revealer.showInFinder(nil)
+assert(Workspace.shared.revealed == [first])
+let item = NSMenuItem()
+item.menu = revealer.table.menu
+item.representedObject = second
+revealer.showInFinder(item)
+assert(Workspace.shared.revealed == [second])
+assert(revealer.index == 0)
+assert(revealer.files == [first, second])
+item.representedObject = nil
+revealer.showInFinder(item)
+assert(Workspace.shared.revealed == [second])
+try FileManager.default.removeItem(at: first)
+revealer.showInFinder(nil)
+assert(revealer.errors == 1)
+assert(Workspace.shared.revealed == [second])
+'''
+        harness = harness.replace("REVEAL_FUNCTION", "func showInFinder(" + reveal).replace("NSWorkspace.shared", "Workspace.shared")
+        with tempfile.TemporaryDirectory() as directory:
+            script = Path(directory) / "main.swift"
+            script.write_text("import Foundation\n" + harness)
+            result = subprocess.run(["swift", str(script), directory], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_configuration_and_move_rollback(self):
         source = Path(__file__).with_name("main.swift").read_text()
         configuration = source.split("struct Destination:", 1)[1].split("final class Sorter:", 1)[0]

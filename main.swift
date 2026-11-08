@@ -50,7 +50,7 @@ struct Configuration: Codable {
     }
 }
 
-final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate {
+final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate, NSMenuDelegate, NSMenuItemValidation {
     var configuration: Configuration!
     var names: [String] { configuration.destinations.map(\.directory) }
     var destinationRoot: URL { Configuration.expand(configuration.destinationRoot) }
@@ -77,6 +77,7 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
     var settingsController: SettingsController?
     let destinationButtons = NSStackView()
     let destinationHelp = NSTextField(labelWithString: "")
+    let revealButton = NSButton(title: "Show in Finder  ⌘⇧R", target: nil, action: nil)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         makeMenu()
@@ -108,12 +109,17 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         let open = button("Open folder…  ⌘O", #selector(chooseFolder))
         recursive.target = self
         recursive.action = #selector(reloadFolder)
-        let toolbar = NSStackView(views: [open, recursive, button("Settings…", #selector(showSettings))])
+        revealButton.target = self
+        revealButton.action = #selector(showInFinder(_:))
+        revealButton.isEnabled = false
+        let toolbar = NSStackView(views: [open, recursive, revealButton, button("Settings…", #selector(showSettings))])
         toolbar.spacing = 18
         root.addArrangedSubview(toolbar)
         folderLabel.lineBreakMode = .byTruncatingMiddle
         folderLabel.textColor = .secondaryLabelColor
-        root.addArrangedSubview(folderLabel)
+        let folderRow = NSStackView(views: [folderLabel, button("Refresh  ⌘R", #selector(refreshFolder))])
+        folderRow.spacing = 12
+        root.addArrangedSubview(folderRow)
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("track"))
         column.title = "MP3s — J / K or ↓ / ↑ select, Enter plays"
         table.addTableColumn(column)
@@ -121,6 +127,11 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         table.dataSource = self
         table.rowHeight = 25
         table.allowsEmptySelection = true
+        let trackMenu = NSMenu()
+        trackMenu.delegate = self
+        let reveal = trackMenu.addItem(withTitle: "Show in Finder", action: #selector(showInFinder(_:)), keyEquivalent: "")
+        reveal.target = self
+        table.menu = trackMenu
         let list = NSScrollView()
         list.documentView = table
         list.hasVerticalScroller = true
@@ -136,7 +147,7 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         transport.spacing = 12
         root.addArrangedSubview(transport)
         root.addArrangedSubview(NSTextField(labelWithString: "H / L or ← / →  scrub 5s    •    Shift  30s    •    J / K  down/up    •    N  next    •    E  comment"))
-        let commentHeader = NSStackView(views: [NSTextField(labelWithString: "Embedded MP3 comment"), button("Save & return  ⌘↵", #selector(saveAndReturn))])
+        let commentHeader = NSStackView(views: [NSTextField(labelWithString: "Comment • ⌘H/L scrub • Shift 30s • ⌘J/K down/up"), button("Save & return  ⌘↵", #selector(saveAndReturn))])
         commentHeader.spacing = 20
         root.addArrangedSubview(commentHeader)
         comment.isRichText = false
@@ -163,7 +174,7 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         status.textColor = .secondaryLabelColor
         status.lineBreakMode = .byTruncatingMiddle
         root.addArrangedSubview(status)
-        for view in [folderLabel, list, title, transport, commentScroll, destinations, status] {
+        for view in [folderRow, list, title, transport, commentScroll, destinations, status] {
             view.widthAnchor.constraint(equalTo: root.widthAnchor).isActive = true
         }
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
@@ -191,6 +202,15 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Quit Audio Sorter", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
+        let file = NSMenuItem()
+        menu.addItem(file)
+        let fileMenu = NSMenu(title: "File")
+        let refresh = fileMenu.addItem(withTitle: "Refresh", action: #selector(refreshFolder), keyEquivalent: "r")
+        refresh.target = self
+        let reveal = fileMenu.addItem(withTitle: "Show in Finder", action: #selector(showInFinder(_:)), keyEquivalent: "r")
+        reveal.keyEquivalentModifierMask = [.command, .shift]
+        reveal.target = self
+        file.submenu = fileMenu
         let edit = NSMenuItem()
         menu.addItem(edit)
         let editMenu = NSMenu(title: "Edit")
@@ -202,6 +222,37 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
     }
 
     var editing: Bool { window.firstResponder === comment }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu === table.menu, let item = menu.items.first else { return }
+        item.representedObject = files.indices.contains(table.clickedRow) ? files[table.clickedRow] : nil
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(refreshFolder) {
+            return window?.isKeyWindow == true && NSApp.modalWindow == nil && source != nil
+        }
+        guard menuItem.action == #selector(showInFinder(_:)) else { return true }
+        guard window?.isKeyWindow == true, NSApp.modalWindow == nil else { return false }
+        if menuItem.menu === table.menu { return menuItem.representedObject is URL }
+        return files.indices.contains(index)
+    }
+
+    @objc func showInFinder(_ sender: Any?) {
+        let url: URL
+        if let item = sender as? NSMenuItem, item.menu === table.menu {
+            guard let clickedURL = item.representedObject as? URL else { return }
+            url = clickedURL
+        } else {
+            guard files.indices.contains(index) else { return }
+            url = files[index]
+        }
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            report(NSError(domain: "AudioSorter", code: 6, userInfo: [NSLocalizedDescriptionKey: "File no longer exists at \(url.path). Reload the source folder."]))
+            return
+        }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
 
     func refreshDestinations() {
         for view in destinationButtons.arrangedSubviews {
@@ -245,11 +296,21 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
         if flags.contains(.command) {
+            if editing, !flags.contains(.shift), !flags.contains(.option), !flags.contains(.control), key == "j" || key == "k" {
+                select(index + (key == "j" ? 1 : -1), autoplay: false)
+                return true
+            }
+            if editing, !flags.contains(.option), !flags.contains(.control), key == "h" || key == "l" {
+                let seconds: Double = flags.contains(.shift) ? 30 : 5
+                scrub(key == "h" ? -seconds : seconds)
+                return true
+            }
             if let number = Int(key), (1...names.count).contains(number), !flags.contains(.shift), !flags.contains(.option), !flags.contains(.control) {
                 if !event.isARepeat { move(number - 1) }
                 return true
             }
             if key == "o" { chooseFolder(); return true }
+            if key == "r", !flags.contains(.shift), !flags.contains(.option), !flags.contains(.control) { refreshFolder(); return true }
             if event.keyCode == 36 || key == "s" { saveAndReturn(); return true }
             if key == "z" && !editing { undoMove(); return true }
             return false
@@ -298,7 +359,12 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         loadFolder(source, autoplay: false)
     }
 
-    func loadFolder(_ url: URL, autoplay: Bool) {
+    @objc func refreshFolder() {
+        guard let source, saveComment() else { return }
+        loadFolder(source, autoplay: false, preservingCurrent: true)
+    }
+
+    func loadFolder(_ url: URL, autoplay: Bool, preservingCurrent: Bool = false) {
         do {
             let keys: [URLResourceKey] = [.isRegularFileKey, .isSymbolicLinkKey]
             let candidates: [URL]
@@ -316,16 +382,22 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
                 let values = try $0.resourceValues(forKeys: Set(keys))
                 return $0.pathExtension.lowercased() == "mp3" && values.isRegularFile == true && values.isSymbolicLink != true
             }.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
-            player?.stop()
+            let current = preservingCurrent && files.indices.contains(index) ? files[index] : nil
+            let retainedIndex = current.flatMap { found.firstIndex(of: $0) }
+            if retainedIndex == nil { player?.stop() }
             source = url
             UserDefaults.standard.set(url.path, forKey: "source")
             folderLabel.stringValue = url.path
             files = found
-            index = -1
+            index = retainedIndex ?? -1
             loading = true
             table.reloadData()
             loading = false
-            if files.isEmpty { clear(); status.stringValue = "No MP3s found. Choose another folder or include subfolders." }
+            if retainedIndex != nil {
+                highlight()
+                status.stringValue = "Refreshed. \(files.count) MP3s ready. Current track and playback position preserved."
+            }
+            else if files.isEmpty { clear(); status.stringValue = "No MP3s found. Choose another folder or include subfolders." }
             else { select(0, autoplay: autoplay); status.stringValue = "\(files.count) MP3s ready. Enter plays; 1–\(names.count) moves the selected file." }
         } catch { report(error) }
     }
@@ -376,6 +448,7 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
             table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
             table.scrollRowToVisible(index)
         } else { table.deselectAll(nil) }
+        revealButton.isEnabled = files.indices.contains(index)
         loading = false
     }
 
