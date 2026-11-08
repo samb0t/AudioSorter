@@ -122,7 +122,7 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         folderRow.spacing = 12
         root.addArrangedSubview(folderRow)
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("track"))
-        column.title = "MP3s — J / K or ↓ / ↑ select, Enter plays"
+        column.title = "Audio (MP3, WAV, AIFF) — J / K or ↓ / ↑ select, Enter plays"
         table.addTableColumn(column)
         table.delegate = self
         table.dataSource = self
@@ -155,6 +155,7 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         commentHeader.spacing = 20
         root.addArrangedSubview(commentHeader)
         comment.isRichText = false
+        comment.toolTip = "MP3/AIFF: ID3 comment. WAV: RIFF INFO ICMT (ASCII edits only); existing WAV ID3 comments are preserved separately."
         comment.isAutomaticQuoteSubstitutionEnabled = false
         comment.isAutomaticDashSubstitutionEnabled = false
         comment.font = .systemFont(ofSize: 14)
@@ -402,7 +403,7 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
             }
             let found = try candidates.filter {
                 let values = try $0.resourceValues(forKeys: Set(keys))
-                return $0.pathExtension.lowercased() == "mp3" && values.isRegularFile == true && values.isSymbolicLink != true
+                return ["mp3", "wav", "aif", "aiff"].contains($0.pathExtension.lowercased()) && values.isRegularFile == true && values.isSymbolicLink != true
             }.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
             let current = preservingCurrent && files.indices.contains(index) ? files[index] : nil
             let retainedIndex = current.flatMap { found.firstIndex(of: $0) }
@@ -417,10 +418,10 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
             loading = false
             if retainedIndex != nil {
                 highlight()
-                status.stringValue = "Refreshed. \(files.count) MP3s ready. Current track and playback position preserved."
+                status.stringValue = "Refreshed. \(files.count) audio files ready. Current track and playback position preserved."
             }
-            else if files.isEmpty { clear(); status.stringValue = "No MP3s found. Choose another folder or include subfolders." }
-            else { select(0, autoplay: autoplay); status.stringValue = "\(files.count) MP3s ready. Enter plays; 1–\(names.count) moves the selected file." }
+            else if files.isEmpty { clear(); status.stringValue = "No supported audio files found (MP3, WAV, AIFF). Choose another folder or include subfolders." }
+            else { select(0, autoplay: autoplay); status.stringValue = "\(files.count) audio files ready. Enter plays; 1–\(names.count) moves the selected file." }
         } catch { report(error) }
     }
 
@@ -492,7 +493,7 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         process.waitUntilExit()
         let result = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
         if process.terminationStatus != 0 {
-            throw NSError(domain: "AudioSorter", code: 2, userInfo: [NSLocalizedDescriptionKey: result["error"] as? String ?? "Cannot access MP3 tags. Try rebuilding the app."])
+            throw NSError(domain: "AudioSorter", code: 2, userInfo: [NSLocalizedDescriptionKey: result["error"] as? String ?? "Cannot access audio tags. Try rebuilding the app."])
         }
         return result
     }
@@ -503,7 +504,7 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         do {
             _ = try helper("write", file: files[index], text: comment.string)
             originalComment = comment.string
-            status.stringValue = "Comment saved to MP3."
+            status.stringValue = "Comment saved to audio file."
             return true
         } catch { report(error); return false }
     }
@@ -805,7 +806,7 @@ final class LintController: NSWindowController, NSTableViewDataSource, NSTableVi
                     let scanned = report["scanned"] as? Int ?? 0
                     let checked = report["checkedFolders"] as? Int ?? 0
                     let skipped = report["skippedFolders"] as? Int ?? 0
-                    summary.stringValue = "\(scanned) MP3s checked across \(checked) mapped folders. \(issues.count) issues. \(skipped) folders skipped (no Genre mapping). Results are a snapshot; check again after sorting or changing settings."
+                    summary.stringValue = "\(scanned) audio files checked across \(checked) mapped folders. \(issues.count) issues. \(skipped) folders skipped (no Genre mapping). Results are a snapshot; check again after sorting or changing settings."
                     table.reloadData()
                 case .failure(let error):
                     summary.stringValue = "Check failed: \(error.localizedDescription)"

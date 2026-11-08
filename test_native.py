@@ -2,12 +2,179 @@
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
 
 @unittest.skipUnless(shutil.which("swift"), "Swift unavailable")
 class NativeTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg unavailable")
+    def test_discovery_playback_and_refresh_all_formats(self):
+        source = Path(__file__).with_name("main.swift").read_text()
+        load = "func loadFolder(" + source.split("    func loadFolder(", 1)[1].split("    func numberOfRows", 1)[0]
+        select = "func select(" + source.split("    func select(", 1)[1].split("    func highlight()", 1)[0]
+        refresh = "func refreshFolder()" + source.split("    @objc func refreshFolder()", 1)[1].split("    func loadFolder(", 1)[0]
+        harness = '''
+import Foundation
+import AVFoundation
+enum State { case on, off }
+class Toggle { var state = State.off }
+class Field { var string = ""; var stringValue = ""; var isEditable = false }
+class Table { func reloadData() {} }
+class Defaults {
+    static let standard = Defaults()
+    func set(_ value: Any, forKey: String) {}
+}
+class Configuration { var startAtThirtyPercent = true }
+class Sorter {
+    let recursive = Toggle()
+    let configuration = Configuration()
+    let table = Table()
+    let folderLabel = Field(), status = Field(), title = Field(), comment = Field()
+    let names = ["House"]
+    var source: URL?
+    var files: [URL] = []
+    var index = -1
+    var loading = false, commentReadable = false, saveSucceeds = true
+    var originalComment = ""
+    var errors = 0
+    var player: AVAudioPlayer?
+    func saveComment() -> Bool { saveSucceeds }
+    func helper(_ action: String, file: URL) throws -> [String: Any] { ["comment": "fixture"] }
+    func report(_ error: Error) { errors += 1 }
+    func highlight() {}
+    func updateTime() {}
+    func clear() { index = -1; player = nil }
+    LOAD
+    SELECT
+    REFRESH
+}
+let root = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
+let sorter = Sorter()
+sorter.loadFolder(root, autoplay: false)
+assert(sorter.files.count == 4 && sorter.errors == 0)
+for i in sorter.files.indices {
+    sorter.select(i, autoplay: false)
+    assert(sorter.player != nil && sorter.player!.duration > 0)
+    assert(!sorter.player!.isPlaying)
+    assert(abs(sorter.player!.currentTime - sorter.player!.duration * 0.3) < 0.01)
+    assert(sorter.comment.string == "fixture")
+}
+let current = sorter.files[sorter.index]
+let player = sorter.player
+sorter.player!.currentTime = 0.01
+sorter.refreshFolder()
+assert(sorter.player === player && sorter.files[sorter.index] == current)
+assert(abs(sorter.player!.currentTime - 0.01) < 0.01)
+sorter.recursive.state = .on
+sorter.refreshFolder()
+assert(sorter.files.count == 5 && sorter.player === player)
+let before = sorter.files
+sorter.saveSucceeds = false
+try FileManager.default.moveItem(at: current, to: root.appendingPathComponent("renamed." + current.pathExtension))
+sorter.refreshFolder()
+assert(sorter.files == before && sorter.player === player)
+sorter.saveSucceeds = true
+sorter.refreshFolder()
+assert(!sorter.files.contains(current) && sorter.files.count == 5)
+assert(sorter.player !== player && !sorter.player!.isPlaying)
+assert(sorter.errors == 0)
+'''.replace("LOAD", load.replace("UserDefaults.standard", "Defaults.standard")).replace("SELECT", select).replace("REFRESH", refresh)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for extension in ["mp3", "WAV", "aif", "AIFF"]:
+                subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=duration=0.1", "-y", str(root / ("track." + extension))], check=True)
+            (root / "nested").mkdir()
+            shutil.copy2(root / "track.WAV", root / "nested/extra.wav")
+            shutil.copy2(root / "track.WAV", root / ".hidden.wav")
+            (root / "unsupported.flac").write_bytes(b"not scanned")
+            (root / "unsupported.m4a").write_bytes(b"not scanned")
+            (root / "link.wav").symlink_to(root / "track.WAV")
+            script = root / "main.swift"
+            script.write_text(harness)
+            result = subprocess.run(["swift", str(script), directory], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_real_format_move_tag_undo_and_rollback(self):
+        from comments import AudioMetadata, genre_values, read_comment
+        from test_formats import fixture, rich_tags
+        source = Path(__file__).with_name("main.swift").read_text()
+        move = "func moveTaggedFile(" + source.split("    func moveTaggedFile(", 1)[1].split("    func move(_ destination:", 1)[0]
+        harness = '''
+import Foundation
+class Mover {
+    var failedRollback = false
+    var calls = 0
+    func helper(_ action: String, file: URL, text: String?) throws -> [String: Any] {
+        calls += 1
+        if failedRollback {
+            try Data("collision".utf8).write(to: URL(fileURLWithPath: CommandLine.arguments[4]))
+            throw NSError(domain: "test", code: 1)
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: CommandLine.arguments[2])
+        process.arguments = [CommandLine.arguments[3], action, file.path]
+        let input = Pipe(), output = Pipe()
+        process.standardInput = input; process.standardOutput = output
+        try process.run()
+        try input.fileHandleForWriting.write(contentsOf: Data((text ?? "").utf8))
+        try input.fileHandleForWriting.close()
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        if process.terminationStatus != 0 { throw NSError(domain: "test", code: 2) }
+        return try JSONSerialization.jsonObject(with: data) as! [String: Any]
+    }
+    MOVE
+}
+let original = URL(fileURLWithPath: CommandLine.arguments[4])
+let target = URL(fileURLWithPath: CommandLine.arguments[5])
+let mover = Mover()
+let restore = try mover.moveTaggedFile(from: original, to: target, change: ["genre": "House"])
+assert(restore != nil)
+_ = try mover.helper("write", file: target, text: "Comment after move")
+_ = try mover.moveTaggedFile(from: target, to: original, change: restore)
+let before = try Data(contentsOf: original)
+// Real metadata validation failure rolls the move back atomically.
+do { _ = try mover.moveTaggedFile(from: original, to: target, change: ["genre": ""]); fatalError("Expected failure") }
+catch {}
+let afterFailure = try Data(contentsOf: original)
+assert(afterFailure == before)
+assert(!FileManager.default.fileExists(atPath: target.path))
+// Collision prevents tagging, including during undo.
+try Data("occupied".utf8).write(to: target)
+let calls = mover.calls
+do { _ = try mover.moveTaggedFile(from: original, to: target, change: restore); fatalError("Expected collision") }
+catch {}
+assert(mover.calls == calls)
+let afterCollision = try Data(contentsOf: original)
+assert(afterCollision == before)
+try FileManager.default.removeItem(at: target)
+// A rollback collision reports the surviving target instead of hiding it.
+mover.failedRollback = true
+do { _ = try mover.moveTaggedFile(from: original, to: target, change: ["genre": "House"]); fatalError("Expected failure") }
+catch { assert(error.localizedDescription.contains(target.path)) }
+let afterRollbackCollision = try Data(contentsOf: target)
+assert(afterRollbackCollision == before)
+'''.replace("MOVE", move)
+        for extension in [".mp3", ".wav", ".aif", ".aiff"]:
+            with self.subTest(extension=extension), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                original, target = root / ("source" + extension), root / ("target" + extension)
+                fixture(original, rich_tags())
+                before = AudioMetadata(original)
+                script = root / "main.swift"
+                script.write_text(harness)
+                result = subprocess.run(["swift", str(script), directory, sys.executable, str(Path(__file__).with_name("comments.py")), str(original), str(target)], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(genre_values(target), ([], None))
+                self.assertEqual(read_comment(target), "Comment after move")
+                after = AudioMetadata(target)
+                if extension == ".mp3":
+                    self.assertEqual(after.audio, before.audio)
+                else:
+                    self.assertEqual([p for p in after.parts if p[0] in (b"data", b"SSND")], [p for p in before.parts if p[0] in (b"data", b"SSND")])
+
     def test_trash_confirmation_and_context_target(self):
         source = Path(__file__).with_name("main.swift").read_text()
         confirm = source.split("    @objc func confirmTrash(", 1)[1].split("    func sendToTrash(", 1)[0]
@@ -172,11 +339,12 @@ for target in [link, root, root.appendingPathComponent("missing.mp3")] {
 // This harness mocks Trash: no files are sent to the real system Trash.
 for url in urls { assert(FileManager.default.fileExists(atPath: url.path)) }
 '''.replace("TRASH_FUNCTION", "@discardableResult func trashFile(" + trash)
-        with tempfile.TemporaryDirectory() as directory:
-            script = Path(directory) / "main.swift"
-            script.write_text(harness)
-            result = subprocess.run(["swift", str(script), directory], capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for extension in [".mp3", ".wav", ".aif", ".aiff"]:
+            with self.subTest(extension=extension), tempfile.TemporaryDirectory() as directory:
+                script = Path(directory) / "main.swift"
+                script.write_text(harness.replace(".mp3", extension))
+                result = subprocess.run(["swift", str(script), directory], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_command_playback_shortcuts_in_both_focus_states(self):
         source = Path(__file__).with_name("main.swift").read_text()
