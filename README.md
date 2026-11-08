@@ -1,7 +1,9 @@
 # Audio Sorter
 
-Local macOS MP3 sorting app. No uploads; audio playback uses AVFoundation. Comments
-are embedded ID3 tags written with Mutagen, without re-encoding the audio.
+Local macOS MP3, WAV, and AIFF (`.aif` / `.aiff`) sorting app. No uploads;
+audio playback uses AVFoundation. Format-aware embedded comments and Genre edits
+never re-encode audio. Mutagen decodes/encodes individual ID3 frames; untouched
+frames and container chunks are preserved byte-for-byte.
 
 ## Build / launch
 
@@ -43,7 +45,8 @@ You can still edit the local config manually and restart; no rebuild is needed.
   ]
   ```
   Missing directories are created on the first move. A configured `genre` replaces
-  the standard ID3 Genre (TCON), not Rekordbox My Tags. Omit it to preserve Genre;
+   Genre (ID3 `TCON` for MP3/AIFF; RIFF INFO `IGNR` for WAV), not Rekordbox
+   My Tags. Omit it to preserve Genre;
   empty values are rejected. Hover over a destination button to see its tagging
   behavior. Choosing the file's current directory remains a no-op, not an in-place
   retag operation.
@@ -58,8 +61,8 @@ You can still edit the local config manually and restart; no rebuild is needed.
 | ⌘W | Close the focused window (closing Settings discards unsaved settings) |
 | ⌘O | Choose any source folder (initially ~/Downloads) |
 | ⌘R | Refresh the file list after changes in Finder (also works while editing comments) |
-| ⌘⇧R | Show the current MP3 in Finder |
-| ⌘Delete | Move the current MP3 to Trash, after confirmation (also while editing comments) |
+| ⌘⇧R | Show the current audio file in Finder |
+| ⌘Delete | Move the current audio file to Trash, after confirmation (also while editing comments) |
 | Enter / Space | Play/pause |
 | H / L or ← / → | Scrub backward/forward 5 seconds |
 | Shift + H / L or Shift + ← / → | Scrub backward/forward 30 seconds |
@@ -68,7 +71,7 @@ You can still edit the local config manually and restart; no rebuild is needed.
 | ⌘J / ⌘K | Save comment and select next/previous track, without autoplay; keep current focus |
 | J / K or ↓ / ↑ | Select next/previous, without autoplay |
 | N | Save comment and preview next, without moving |
-| E | Edit embedded MP3 comment |
+| E | Edit embedded comment |
 | ⌘Enter / ⌘S | Save comment and return to sorting |
 | ⌘1–⌘9 (configured destinations) | Save comment, move, and preview next, even inside the comment editor |
 | Esc, while editing | Discard unsaved comment edits |
@@ -81,7 +84,7 @@ In the sorting window, ⌘H scrubs backward instead of hiding the app, regardles
 focus. The ⌘H/L and ⌘J/K shortcuts work both inside and outside the comment editor.
 Scrubbing keeps the current focus and leaves unsaved text unchanged.
 Clicking a destination also saves edits.
-Use **Show in Finder** in the toolbar or File menu to reveal the current MP3, or
+Use **Show in Finder** in the toolbar or File menu to reveal the current audio file, or
 right-click a list item to reveal that file without changing tracks. This does not
 move files, change playback, or save pending comment edits.
 **Move to Trash…** is available in the File menu and by right-clicking a list item.
@@ -95,7 +98,8 @@ Move command does not undo deletion. Plain Delete still edits text normally.
 Changing track, folder, or quitting saves pending comments. Moving automatically
 plays the next track. At the end, playback stops; it does not wrap around.
 
-Only MP3s are listed. Subfolders are opt-in. Symbolic links are excluded.
+MP3, WAV, `.aif`, and `.aiff` files are listed (case-insensitive). Subfolders are
+opt-in. Hidden files and symbolic links are excluded. FLAC/M4A are not listed.
 Rescan with **Refresh** beside the source path or in the File menu.
 Refresh saves pending comments, then picks up additions, removals, and renames.
 If the current file's path remains listed, selection and playback position are
@@ -108,8 +112,51 @@ the original in place. A failed Genre write rolls back the move; if rollback als
 fails, the error reports the remaining file location for recovery. Move undo is
 session-only, restores the previous Genre (including an absent Genre), and does not
 undo comment edits. Undo refuses to overwrite files at the original path.
-Comments preserve other tag frames and existing ID3v2.3/v2.4 format, with atomic
-same-directory replacement. As with any tag editor, keep backups of valuable files.
+Edits preserve other tag frames and existing ID3v2.3/v2.4 format, with verified,
+atomic same-directory temporary-file replacement. Artwork, DJ-specific frames,
+opaque chunks, audio payloads, and chunk alignment bytes are copied unchanged.
+As with any tag editor, keep backups of valuable files.
+
+### Metadata formats and safety limits
+
+| Format | Comment | Genre |
+| --- | --- | --- |
+| MP3 | ID3 `COMM` | ID3 `TCON` |
+| AIFF (`.aif`, `.aiff`) | ID3 `COMM` in `ID3 ` chunk | ID3 `TCON` |
+| WAV | RIFF `LIST/INFO/ICMT` | RIFF `LIST/INFO/IGNR` |
+
+Pioneer DJ's [rekordbox metadata reference](https://forums.pioneerdj.com/hc/en-us/articles/205021569-rekordbox-metadata)
+explicitly identifies WAV comments as `ICMT` and Genre as `IGNR`. WAV ID3-only
+Genre was ignored by Reload Tag in the previously reported test; updating `IGNR`
+fixed that tested WAV. Do not rely on an ID3 inspector's Genre for WAV compatibility.
+WAV comments read/write `ICMT` only; existing ID3 comments are preserved, not used
+as a fallback or synchronized (including any old ID3-only comment).
+
+WAV Genre writes also synchronize an **existing** ID3 `TCON` to prevent stale,
+conflicting values; they do not create ID3 tags just for Genre. Genre undo restores
+both prior fields independently, including conflicts, original raw frame/text
+bytes, and absent fields. Comments edited after a move survive Genre undo.
+
+RIFF INFO text has no universal Unicode encoding. For now WAV comment/Genre edits
+accept ASCII only (no embedded NUL); non-ASCII or malformed existing target fields
+are reported as unsupported, not guessed or silently converted. Unicode remains
+supported for MP3/AIFF ID3 comments and Genre. International WAV encoding support
+requires separate Rekordbox verification.
+
+Malformed chunk sizes, duplicate INFO fields/lists or ID3 chunks/frames, ID3v2.2,
+extended/flagged/unsynchronized ID3, and RF64/RIFX WAV are rejected rather than
+repaired. The same checks apply to linting. Supported RIFF WAVE and FORM AIFF/AIFC
+layouts must have exactly one audio-data chunk and one format chunk. Writes use
+in-memory copies, so very large files may require substantial memory. A failed
+write leaves the original intact and cleans up its temporary file.
+
+**Verification status:** automated temporary-fixture checks cover all four filename
+extensions, AVFoundation loading/preview position, discovery/refresh, mocked Trash,
+move/tag rollback, collisions, Genre undo, and byte-identical audio packets/chunks.
+No manual Rekordbox import or Reload Tag verification was performed for this change.
+On disposable copies, verify import and Reload Tag for comments and Genre per format,
+then verify Genre undo/reload and WAV RIFF/ID3 conflict handling. Do not test on the
+music library without backups.
 
 Sort before importing into Rekordbox to avoid missing-file references. Files already
 in Rekordbox may need relocating after moves, and tag reloads after comment or Genre
@@ -125,6 +172,10 @@ subfolders, and never changes files, tags, pending comments, selection, or playb
 Destinations without a Genre mapping are skipped, as are hidden files/directories
 and symbolic links. Missing destination folders and directory/tag read failures
 are reported alongside missing or mismatched Genre tags (including extra values).
+All supported audio formats are checked. WAV checks use `IGNR`, not ID3 as a
+fallback: missing RIFF Genre or conflicting RIFF/ID3 values are findings, even when
+an ID3 inspector shows the expected Genre. Unsupported/ambiguous metadata is a read
+error finding, never a successful match or an automatic repair.
 
 The results window shows the expected and actual Genre and the issue for each
 file. Select an issue and click **Show in Finder**; if its path is missing, Finder
@@ -133,7 +184,27 @@ Results are a snapshot: check again after sorting, editing tags, or changing
 settings. This checks consistency with your rules, not the musical genre itself.
 There are no automatic fixes.
 
+## TODO
+
+- [x] Add WAV and AIFF discovery, playback, comments/Genre, moves/undo, refresh,
+  Trash, and read-only linting with lossless format-aware metadata handling.
+- [ ] Manually verify Rekordbox import/Reload Tag for MP3, WAV, and AIFF comments
+  and Genre, and evaluate international WAV INFO text encodings.
+- [ ] Evaluate FLAC separately: Vorbis comments and picture blocks need a lossless
+  preservation/undo strategy plus AVFoundation and Rekordbox checks. Not implemented.
+- [ ] Evaluate M4A separately: MP4 metadata atoms (`©cmt`, `©gen`/`gnre`), artwork,
+  unknown/DJ atoms, and chunk-offset-safe writes need separate design and tests.
+  AAC versus ALAC playback/tag compatibility must be checked independently.
+  Neither FLAC nor M4A support is approved or included in this change.
+- [ ] Add **Fix selected** to the destination tag checker: after explicit
+  confirmation, apply the configured Genre to selected missing/mismatched tag
+  findings. Revalidate paths and mappings before writing, preserve other tags
+  and audio, report per-file failures, and refresh the results. Keep missing
+  directories and unreadable files as report-only findings.
+
 ## Tests
 
 Run `.venv/bin/python -m unittest -v`. Tests use temporary files only. FFmpeg is
-needed for the audio-preservation integration test; that test skips if unavailable.
+needed for real-audio packet-preservation and native playback tests; those tests
+skip if unavailable. Native tests require Swift/macOS. Trash is mocked; tests never
+send files to the real Trash or modify the user's music library.

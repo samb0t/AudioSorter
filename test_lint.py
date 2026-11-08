@@ -59,11 +59,12 @@ class LintTests(unittest.TestCase):
         self.assertEqual(result["skippedFolders"], 2)
         self.assertEqual(result["issues"], [])
 
-    def test_excludes_symlinks_hidden_and_non_mp3s(self):
+    def test_excludes_symlinks_hidden_and_unsupported_formats(self):
         self.track("good.mp3", ["Breaks"])
         self.track(".hidden.mp3")
         self.track(".hidden/nested.mp3")
-        self.track("ignore.wav")
+        self.track("ignore.flac")
+        self.track("ignore.m4a")
         outside = self.root / "outside"
         outside.mkdir()
         (outside / "wrong.mp3").write_bytes(b"audio")
