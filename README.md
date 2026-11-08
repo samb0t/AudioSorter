@@ -61,9 +61,9 @@ You can still edit the local config manually and restart; no rebuild is needed.
 | Enter / Space | Play/pause |
 | H / L or ← / → | Scrub backward/forward 5 seconds |
 | Shift + H / L or Shift + ← / → | Scrub backward/forward 30 seconds |
-| ⌘H / ⌘L, while editing comments | Scrub backward/forward 5 seconds |
-| ⌘⇧H / ⌘⇧L, while editing comments | Scrub backward/forward 30 seconds |
-| ⌘J / ⌘K, while editing comments | Save comment and select next/previous track, without autoplay; keep editing |
+| ⌘H / ⌘L | Scrub backward/forward 5 seconds, including while editing comments |
+| ⌘⇧H / ⌘⇧L | Scrub backward/forward 30 seconds, including while editing comments |
+| ⌘J / ⌘K | Save comment and select next/previous track, without autoplay; keep current focus |
 | J / K or ↓ / ↑ | Select next/previous, without autoplay |
 | N | Save comment and preview next, without moving |
 | E | Edit embedded MP3 comment |
@@ -75,8 +75,9 @@ You can still edit the local config manually and restart; no rebuild is needed.
 
 Plain numbers and playback keys type normally in the comment editor. Use ⌘number
 to move directly from the editor, or leave it with ⌘Enter and use plain numbers.
-While editing comments, ⌘H scrubs backward instead of hiding the app; these scrub
-shortcuts keep the editor focused and leave unsaved text unchanged.
+In the sorting window, ⌘H scrubs backward instead of hiding the app, regardless of
+focus. The ⌘H/L and ⌘J/K shortcuts work both inside and outside the comment editor.
+Scrubbing keeps the current focus and leaves unsaved text unchanged.
 Clicking a destination also saves edits.
 Use **Show in Finder** in the toolbar or File menu to reveal the current MP3, or
 right-click a list item to reveal that file without changing tracks. This does not
