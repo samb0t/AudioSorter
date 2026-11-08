@@ -4,6 +4,7 @@ Untouched ID3 frames and RIFF/IFF chunks are copied verbatim, not reserialized.
 Ambiguous/unsupported layouts fail closed, including on read-only lint scans.
 """
 import base64
+import hashlib
 import io
 import json
 import os
@@ -221,7 +222,7 @@ class AudioMetadata:
         body = self.original[8:12] + b"".join(replacements.get(i, raw) for i, (_, _, raw) in enumerate(self.parts)) + b"".join(additions)
         return self.original[:4] + len(body).to_bytes(4, self.endian) + body
 
-    def save(self, edit_id3=False, edit_info=False):
+    def save(self, edit_id3=False, edit_info=False, validate=None):
         output = self.output(edit_id3, edit_info)
         fd, temporary = tempfile.mkstemp(prefix=".audio-sorter-", suffix=self.extension, dir=self.path.parent)
         os.close(fd)
@@ -237,6 +238,8 @@ class AudioMetadata:
                 raise OSError("Temporary file verification failed")
             if self.path.is_symlink() or self.path.read_bytes() != self.original:
                 raise OSError("Source changed during tag write")
+            if validate is not None:
+                validate()
             os.replace(temporary, self.path)
         finally:
             if os.path.exists(temporary):
@@ -286,7 +289,7 @@ def info_encode(text):
         raise ValueError("WAV INFO supports ASCII edits only; Unicode/codepage compatibility needs Rekordbox verification")
 
 
-def write_genre(path, change):
+def write_genre(path, change, validate=None):
     """Set a genre or restore its prior frame; return a JSON-safe undo snapshot."""
     metadata = AudioMetadata(path)
     tags = metadata.block.tags()
@@ -312,20 +315,92 @@ def write_genre(path, change):
             restore = restore["id3"]
         replacement = (base64.b64decode(restore["raw"], validate=True) if "raw" in restore else metadata.block.encode(TCON(encoding=restore["encoding"], text=restore["text"]))) if restore is not None else None
     metadata.block.replace(b"TCON", replacement)
-    metadata.save(edit_id3=not metadata.wav or old_raw is not None or replacement is not None, edit_info=metadata.wav)
+    metadata.save(edit_id3=not metadata.wav or old_raw is not None or replacement is not None, edit_info=metadata.wav, validate=validate)
     return previous
 
 
 def genre_values(path):
     metadata = AudioMetadata(path)
     values = [str(value) for frame in tags_for(path).getall("TCON") for value in frame.text]
+    nonempty = any(value != "" for value in values)
     if not metadata.wav:
-        return values, None
+        return values if nonempty else [], None
+    metadata.info_text(b"ICMT")  # Malformed supported metadata remains report-only.
     riff = metadata.info_text(b"IGNR")
     actual = [riff] if riff else []
-    if values and values != actual:
+    if nonempty and values != actual:
         return actual + ["ID3: " + " | ".join(values)], "Conflicting WAV RIFF INFO / ID3 Genre (Rekordbox reads IGNR)"
     return actual, None
+
+
+def repair_snapshot(path):
+    stat = path.stat()
+    return {"device": stat.st_dev, "inode": stat.st_ino, "mtime": stat.st_mtime_ns,
+            "size": stat.st_size, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+
+
+class StaleRepair(ValueError):
+    pass
+
+
+def repair_path(root, finding, destinations):
+    """Validate containment without following any link below the configured root."""
+    root = Path(root).expanduser().absolute()
+    path = Path(finding["path"])
+    if root.is_symlink() or not root.is_dir() or not path.is_absolute():
+        raise StaleRepair("Destination is missing or a symbolic link")
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        raise StaleRepair("Path outside configured destination")
+    if len(relative.parts) < 2 or any(p in ("..", ".") or p.startswith(".") for p in relative.parts):
+        raise StaleRepair("Invalid destination path")
+    current = root
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            raise StaleRepair("Symbolic link in destination path")
+    if not path.resolve().is_relative_to(root.resolve()) or not path.is_file():
+        raise StaleRepair("File missing or outside destination")
+    matches = [d for d in destinations if isinstance(d, dict) and d.get("directory") == relative.parts[0]]
+    if len(matches) != 1 or not matches[0].get("genre") or matches[0]["genre"] != finding.get("expected"):
+        raise StaleRepair("Destination Genre mapping changed")
+    return path
+
+
+def repair_missing_genres(root, findings, configuration):
+    """Separate explicit write operation. No move, directory creation, or undo entry.
+
+    configuration is a callable so settings are reloaded before each commit.
+    """
+    results = []
+    for finding in findings:
+        result = {"path": finding.get("path", ""), "genre": finding.get("expected", "")}
+        try:
+            if finding.get("repairable") is not True or finding.get("problem") != "Missing Genre" or not finding.get("snapshot"):
+                raise StaleRepair("Finding is report-only")
+
+            def validate():
+                config = configuration()
+                if Path(config["destinationRoot"]).expanduser().absolute() != Path(root).expanduser().absolute():
+                    raise StaleRepair("Destination root changed")
+                path = repair_path(root, finding, config["destinations"])
+                if repair_snapshot(path) != finding["snapshot"]:
+                    raise StaleRepair("File changed since check")
+                actual, conflict = genre_values(path)
+                if actual or conflict:
+                    raise StaleRepair("Genre is no longer safely missing")
+                return path
+
+            path = validate()
+            write_genre(path, {"genre": finding["expected"]}, validate=validate)
+            result.update(status="success", detail="Genre filled")
+        except (StaleRepair, FileNotFoundError) as error:
+            result.update(status="skipped", detail=str(error))
+        except Exception as error:
+            result.update(status="failed", detail=str(error))
+        results.append(result)
+    return {"results": results}
 
 
 def lint_destinations(root, destinations):
@@ -333,10 +408,12 @@ def lint_destinations(root, destinations):
     root = Path(root).expanduser()
     result = {"scanned": 0, "checkedFolders": 0, "skippedFolders": 0, "issues": []}
 
-    def issue(path, expected, actual, problem):
+    def issue(path, expected, actual, problem, snapshot=None):
         result["issues"].append({
             "path": str(path.absolute()), "file": str(path.relative_to(root)),
             "expected": expected, "actual": actual, "problem": problem,
+            "repairable": problem == "Missing Genre" and snapshot is not None,
+            "snapshot": snapshot,
         })
 
     for destination in destinations:
@@ -348,7 +425,7 @@ def lint_destinations(root, destinations):
             raise ValueError("Invalid destination directory")
         folder = root / name
         result["checkedFolders"] += 1
-        if folder.is_symlink() or not folder.is_dir():
+        if root.is_symlink() or folder.is_symlink() or not folder.is_dir():
             issue(folder, expected, [], "Destination is missing, not a directory, or a symbolic link")
             continue
 
@@ -367,9 +444,12 @@ def lint_destinations(root, destinations):
                     if not path.is_file():
                         continue
                     result["scanned"] += 1
+                    snapshot = repair_snapshot(path)
                     actual, problem = genre_values(path)
+                    if snapshot != repair_snapshot(path):
+                        raise OSError("File changed during check")
                     if problem or actual != [expected]:
-                        issue(path, expected, actual, problem or ("Missing Genre" if not actual else "Genre mismatch"))
+                        issue(path, expected, actual, problem or ("Missing Genre" if not actual else "Genre mismatch"), snapshot)
                 except Exception as error:
                     issue(path, expected, [], f"Cannot read tags: {error}")
     return result
@@ -388,6 +468,11 @@ if __name__ == "__main__":
             print(json.dumps({"previous": previous}))
         elif action == "lint":
             print(json.dumps(lint_destinations(path, json.load(sys.stdin)["destinations"])))
+        elif action == "repair-missing-genres":
+            request = json.load(sys.stdin)
+            def current_configuration():
+                return json.loads(Path(request["configurationPath"]).read_text())
+            print(json.dumps(repair_missing_genres(path, request["findings"], current_configuration)))
         else:
             raise ValueError("Unknown action")
     except Exception as error:

@@ -76,6 +76,9 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
     var configurationURL: URL!
     var settingsController: SettingsController?
     var lintController: LintController?
+    // Main-thread gate: existing sorting/comment/undo operations are synchronous.
+    // Set before launching the worker, release only after every helper has exited.
+    var repairingGenres = false
     let destinationButtons = NSStackView()
     let destinationHelp = NSTextField(labelWithString: "")
     let revealButton = NSButton(title: "Show in Finder  ⌘⇧R", target: nil, action: nil)
@@ -305,7 +308,7 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
             UserDefaults.standard.removeObject(forKey: "source")
             loadFolder(Configuration.expand(updated.sourceFolder), autoplay: false)
         } else {
-            status.stringValue = "Settings saved. Destination and genre changes apply to future moves."
+            status.stringValue = "Settings saved. Destination and Genre changes apply to future moves and confirmed missing-Genre repairs."
         }
         return true
     }
@@ -499,6 +502,10 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
     }
 
     @discardableResult func saveComment() -> Bool {
+        guard !repairingGenres else {
+            status.stringValue = "Genre repair is running. File changes are temporarily unavailable; pending comments are unchanged."
+            return false
+        }
         guard files.indices.contains(index), comment.string != originalComment else { return true }
         guard commentReadable else { return false }
         do {
@@ -571,6 +578,7 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
     }
 
     @discardableResult func trashFile(_ url: URL) -> Bool {
+        guard !repairingGenres else { return false }
         guard let removedIndex = files.firstIndex(of: url) else { return false }
         let current = files.indices.contains(index) ? files[index] : nil
         let deletingCurrent = current == url
@@ -710,15 +718,17 @@ final class LintController: NSWindowController, NSTableViewDataSource, NSTableVi
     let table = NSTableView()
     let scanButton = NSButton(title: "Check again", target: nil, action: nil)
     let revealButton = NSButton(title: "Show in Finder", target: nil, action: nil)
+    let fixButton = NSButton(title: "Fix selected missing Genres…", target: nil, action: nil)
+    let repairReport = NSTextView()
     var issues: [[String: Any]] = []
     var scanning = false
 
     init(sorter: Sorter) {
         self.sorter = sorter
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 520), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 640), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         super.init(window: window)
         window.title = "Check destination tags"
-        window.minSize = NSSize(width: 760, height: 400)
+        window.minSize = NSSize(width: 760, height: 560)
         window.isReleasedWhenClosed = false
         let content = NSStackView()
         content.orientation = .vertical
@@ -732,7 +742,7 @@ final class LintController: NSWindowController, NSTableViewDataSource, NSTableVi
             content.topAnchor.constraint(equalTo: window.contentView!.topAnchor, constant: 20),
             content.bottomAnchor.constraint(equalTo: window.contentView!.bottomAnchor, constant: -20)
         ])
-        content.addArrangedSubview(NSTextField(labelWithString: "Read-only Genre check • Includes subfolders • No files or tags are changed"))
+        content.addArrangedSubview(NSTextField(labelWithString: "Read-only scan • Includes subfolders • Repairs require confirmation"))
         rootLabel.lineBreakMode = .byTruncatingMiddle
         rootLabel.textColor = .secondaryLabelColor
         content.addArrangedSubview(rootLabel)
@@ -746,7 +756,7 @@ final class LintController: NSWindowController, NSTableViewDataSource, NSTableVi
         table.delegate = self
         table.dataSource = self
         table.rowHeight = 26
-        table.allowsMultipleSelection = false
+        table.allowsMultipleSelection = true
         let scroll = NSScrollView()
         scroll.documentView = table
         scroll.hasVerticalScroller = true
@@ -759,9 +769,25 @@ final class LintController: NSWindowController, NSTableViewDataSource, NSTableVi
         revealButton.target = self
         revealButton.action = #selector(reveal)
         revealButton.isEnabled = false
-        let actions = NSStackView(views: [scanButton, revealButton])
+        fixButton.target = self
+        fixButton.action = #selector(confirmRepair)
+        fixButton.isEnabled = false
+        let actions = NSStackView(views: [scanButton, revealButton, fixButton])
         actions.spacing = 12
         content.addArrangedSubview(actions)
+        repairReport.isEditable = false
+        repairReport.isRichText = false
+        repairReport.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        let reportScroll = NSScrollView()
+        reportScroll.documentView = repairReport
+        reportScroll.hasVerticalScroller = true
+        repairReport.isVerticallyResizable = true
+        repairReport.isHorizontallyResizable = false
+        repairReport.autoresizingMask = [.width]
+        repairReport.textContainer?.widthTracksTextView = true
+        content.addArrangedSubview(reportScroll)
+        reportScroll.heightAnchor.constraint(equalToConstant: 90).isActive = true
+        reportScroll.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
         for view in [rootLabel, summary, scroll] {
             view.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
         }
@@ -778,7 +804,7 @@ final class LintController: NSWindowController, NSTableViewDataSource, NSTableVi
     }
 
     @objc func scan() {
-        guard !scanning else { return }
+        guard !scanning, !sorter.repairingGenres else { return }
         // Snapshot settings on the main thread; the worker only reads disk.
         let root = sorter.destinationRoot
         let configuration: String
@@ -791,6 +817,7 @@ final class LintController: NSWindowController, NSTableViewDataSource, NSTableVi
         scanning = true
         scanButton.isEnabled = false
         revealButton.isEnabled = false
+        fixButton.isEnabled = false
         issues = []
         table.reloadData()
         rootLabel.stringValue = root.path
@@ -834,6 +861,78 @@ final class LintController: NSWindowController, NSTableViewDataSource, NSTableVi
 
     func tableViewSelectionDidChange(_ notification: Notification) {
         revealButton.isEnabled = !scanning && issues.indices.contains(table.selectedRow)
+        fixButton.isEnabled = !scanning && !sorter.repairingGenres && !selectedRepairs.isEmpty
+    }
+
+    var selectedRepairs: [[String: Any]] {
+        table.selectedRowIndexes.compactMap { row in
+            guard issues.indices.contains(row), issues[row]["repairable"] as? Bool == true,
+                  issues[row]["problem"] as? String == "Missing Genre" else { return nil }
+            return issues[row]
+        }
+    }
+
+    @objc func confirmRepair() {
+        guard !scanning, !sorter.repairingGenres else { return }
+        let findings = selectedRepairs
+        guard !findings.isEmpty else { return }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Fill missing Genres in \(findings.count) selected files?"
+        alert.informativeText = "Only eligible selected findings are included. Each file and mapping will be revalidated before writing. No files are moved or directories created. This repair has no app undo; the existing Undo Move history is unchanged. Keep backups."
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 650, height: 240))
+        let list = NSTextView(frame: scroll.bounds)
+        list.isEditable = false
+        list.isRichText = false
+        list.isVerticallyResizable = true
+        list.isHorizontallyResizable = false
+        list.autoresizingMask = [.width]
+        list.textContainer?.widthTracksTextView = true
+        list.string = findings.map { "\($0["path"] as? String ?? "")\n  → Genre: \($0["expected"] as? String ?? "")" }.joined(separator: "\n\n")
+        scroll.documentView = list
+        scroll.hasVerticalScroller = true
+        alert.accessoryView = scroll
+        alert.addButton(withTitle: "Cancel").keyEquivalent = "\r"
+        alert.addButton(withTitle: "Fix missing Genres").keyEquivalent = ""
+        guard alert.runModal() == .alertSecondButtonReturn else { return }
+        startRepair(findings)
+    }
+
+    func startRepair(_ findings: [[String: Any]]) {
+        guard !scanning, !sorter.repairingGenres, !findings.isEmpty else { return }
+        let root = sorter.destinationRoot
+        let request: String
+        do {
+            let data = try JSONSerialization.data(withJSONObject: ["findings": findings, "configurationPath": sorter.configurationURL.path])
+            request = String(decoding: data, as: UTF8.self)
+        } catch {
+            summary.stringValue = "Cannot start repair: \(error.localizedDescription)"
+            return
+        }
+        sorter.repairingGenres = true
+        scanButton.isEnabled = false
+        fixButton.isEnabled = false
+        summary.stringValue = "Repairing missing Genres… Playback and pending comment text are unchanged. File changes are temporarily unavailable."
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            let result = Result { try sorter.helper("repair-missing-genres", file: root, text: request) }
+            DispatchQueue.main.async { [self] in
+                sorter.repairingGenres = false
+                switch result {
+                case .success(let report):
+                    let results = report["results"] as? [[String: Any]] ?? []
+                    let counts = ["success", "skipped", "failed"].map { state in
+                        "\(results.filter { $0["status"] as? String == state }.count) \(state)"
+                    }.joined(separator: ", ")
+                    repairReport.string = counts + "\n" + results.map {
+                        "\($0["status"] as? String ?? "failed"): \($0["path"] as? String ?? "") → \($0["genre"] as? String ?? ""): \($0["detail"] as? String ?? "")"
+                    }.joined(separator: "\n")
+                case .failure(let error):
+                    repairReport.string = "Repair process failed: \(error.localizedDescription). Check again for current file state."
+                }
+                // Never refresh the sorting queue, load a track, save comments, or touch undo.
+                scan()
+            }
+        }
     }
 
     @objc func reveal() {
@@ -882,7 +981,7 @@ final class SettingsController: NSWindowController {
             line.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
         }
         content.addArrangedSubview(NSTextField(labelWithString: "Destinations / genre mapping (in keyboard shortcut order)"))
-        let hint = NSTextField(wrappingLabelWithString: "Folders are created inside the destination parent. Leave Genre blank to preserve the existing tag. Changes affect future moves only.")
+        let hint = NSTextField(wrappingLabelWithString: "Sorting creates folders inside the destination parent. Leave Genre blank to preserve the existing tag. Changes affect future moves and explicitly confirmed missing-Genre repairs, never existing tags automatically.")
         hint.textColor = .secondaryLabelColor
         content.addArrangedSubview(hint)
         hint.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true

@@ -9,6 +9,113 @@ import unittest
 
 @unittest.skipUnless(shutil.which("swift"), "Swift unavailable")
 class NativeTests(unittest.TestCase):
+    def test_repair_confirmation_selection_background_gate_and_rescan(self):
+        source = Path(__file__).with_name("main.swift").read_text().split("let app = NSApplication.shared", 1)[0]
+        source = source.replace("final class Sorter:", "class Sorter:")
+        # Exercise the real confirmation construction without displaying a modal UI.
+        source = source.replace("guard alert.runModal() == .alertSecondButtonReturn else { return }\n        startRepair(findings)",
+                                "guard TestAlerts.confirm(alert) else { return }\n        startRepair(findings)")
+        harness = r'''
+enum TestAlerts {
+    static var accepted = false
+    static var latest: NSAlert?
+    static func confirm(_ alert: NSAlert) -> Bool { latest = alert; return accepted }
+}
+class TestSorter: Sorter {
+    let entered = DispatchSemaphore(value: 0)
+    let release = DispatchSemaphore(value: 0)
+    var actions: [String] = []
+    var scannedRoot: URL?
+    override func helper(_ action: String, file: URL, text: String? = nil) throws -> [String: Any] {
+        actions.append(action)
+        if action == "repair-missing-genres" {
+            let request = try JSONSerialization.jsonObject(with: Data(text!.utf8)) as! [String: Any]
+            assert((request["findings"] as! [[String: Any]]).count == 1)
+            entered.signal()
+            release.wait()
+            return ["results": [["path": "fixture.wav", "genre": "House", "status": "success", "detail": "Genre filled"]]]
+        }
+        assert(action == "lint")
+        scannedRoot = file
+        return ["issues": [], "scanned": 1, "checkedFolders": 1, "skippedFolders": 0]
+    }
+}
+let app = NSApplication.shared
+let root = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
+let track = root.appendingPathComponent("fixture.wav")
+let sorter = TestSorter()
+sorter.configuration = try JSONDecoder().decode(Configuration.self, from: Data("{\"destinationRoot\":\"\(root.path)\",\"destinations\":[{\"directory\":\"House\",\"genre\":\"House\"}]}".utf8))
+sorter.configurationURL = root.appendingPathComponent("config.json")
+sorter.window = NSWindow()
+sorter.files = [track]
+sorter.index = 0
+sorter.comment.string = "pending comment"
+sorter.originalComment = "original"
+sorter.commentReadable = true
+sorter.player = try AVAudioPlayer(contentsOf: track)
+sorter.player!.currentTime = 0.01
+let player = sorter.player
+sorter.undoMoves = [(track, root.appendingPathComponent("moved.wav"), nil)]
+let controller = LintController(sorter: sorter)
+let missing: [String: Any] = ["path": track.path, "file": "fixture.wav", "expected": "House", "problem": "Missing Genre", "repairable": true, "snapshot": ["test": 1]]
+controller.issues = [missing, ["problem": "Genre mismatch", "repairable": false], ["problem": "Missing directory", "repairable": false]]
+controller.table.reloadData()
+controller.table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
+controller.tableViewSelectionDidChange(Notification(name: NSTableView.selectionDidChangeNotification))
+assert(!controller.fixButton.isEnabled)
+controller.confirmRepair()
+assert(TestAlerts.latest == nil && sorter.actions.isEmpty)
+controller.table.selectRowIndexes(IndexSet([0, 1, 2]), byExtendingSelection: false)
+controller.tableViewSelectionDidChange(Notification(name: NSTableView.selectionDidChangeNotification))
+assert(controller.fixButton.isEnabled && controller.selectedRepairs.count == 1)
+controller.confirmRepair()
+assert(sorter.actions.isEmpty && !sorter.repairingGenres)
+let alert = TestAlerts.latest!
+assert(alert.buttons[0].title == "Cancel" && alert.buttons[0].keyEquivalent == "\r")
+assert(alert.informativeText.contains("no app undo"))
+let list = (alert.accessoryView as! NSScrollView).documentView as! NSTextView
+assert(list.string.contains(track.path) && list.string.contains("Genre: House"))
+TestAlerts.accepted = true
+controller.confirmRepair()
+assert(sorter.repairingGenres && !controller.fixButton.isEnabled && !controller.scanButton.isEnabled)
+assert(sorter.entered.wait(timeout: .now() + 5) == .success)
+// Every main-app mutation path is gated, even Trash of a noncurrent track.
+assert(!sorter.saveComment())
+sorter.move(0)
+sorter.undoMove()
+assert(!sorter.trashFile(track))
+let settingsApplied = try sorter.applySettings(sorter.configuration)
+assert(!settingsApplied)
+assert(sorter.applicationShouldTerminate(app) == .terminateCancel)
+assert(sorter.files == [track] && sorter.index == 0 && sorter.undoMoves.count == 1)
+assert(sorter.comment.string == "pending comment" && sorter.originalComment == "original")
+assert(sorter.player === player && abs(player!.currentTime - 0.01) < 0.01)
+controller.confirmRepair() // Cannot launch another repair while busy.
+assert(sorter.actions == ["repair-missing-genres"])
+// Rescan must snapshot settings at completion, not reuse the old scan input.
+sorter.configuration.destinationRoot = root.appendingPathComponent("current-settings").path
+sorter.release.signal()
+let deadline = Date().addingTimeInterval(10)
+while (sorter.repairingGenres || sorter.actions.count < 2 || controller.scanning) && Date() < deadline {
+    RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+}
+assert(!sorter.repairingGenres && !controller.scanning)
+assert(sorter.actions == ["repair-missing-genres", "lint"])
+assert(sorter.scannedRoot?.path == sorter.configuration.destinationRoot)
+assert(controller.repairReport.string.contains("1 success") && controller.repairReport.string.contains("Genre filled"))
+assert(controller.issues.isEmpty)
+assert(sorter.comment.string == "pending comment" && sorter.originalComment == "original")
+assert(sorter.player === player && sorter.index == 0 && sorter.files == [track] && sorter.undoMoves.count == 1)
+'''
+        from test_formats import fixture
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture(root / "fixture.wav")
+            script = root / "main.swift"
+            script.write_text(source + harness)
+            result = subprocess.run(["swift", str(script), directory], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg unavailable")
     def test_discovery_playback_and_refresh_all_formats(self):
         source = Path(__file__).with_name("main.swift").read_text()
@@ -260,6 +367,7 @@ class Player {
 }
 class Sorter {
     var files: [URL]
+    var repairingGenres = false
     var index = 1
     var player: Player? = Player()
     var originalComment = "original"
