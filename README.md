@@ -106,6 +106,22 @@ edits. Create Rekordbox Intelligent Playlists using conditions such as `Genre eq
 House` to automatically group imported tracks. These playlists do not watch folders
 or import files automatically. Keep gig playlists as curated regular playlists.
 
+## Check destination tags
+
+Choose **File → Check destination tags…** to lint the configured destination
+folders against their Genre mappings. The check runs in the background, includes
+subfolders, and never changes files, tags, pending comments, selection, or playback.
+Destinations without a Genre mapping are skipped, as are hidden files/directories
+and symbolic links. Missing destination folders and directory/tag read failures
+are reported alongside missing or mismatched Genre tags (including extra values).
+
+The results window shows the expected and actual Genre and the issue for each
+file. Select an issue and click **Show in Finder**; if its path is missing, Finder
+reveals the nearest existing parent. **Check again** uses the latest settings.
+Results are a snapshot: check again after sorting, editing tags, or changing
+settings. This checks consistency with your rules, not the musical genre itself.
+There are no automatic fixes.
+
 ## Tests
 
 Run `.venv/bin/python -m unittest -v`. Tests use temporary files only. FFmpeg is

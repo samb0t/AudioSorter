@@ -78,6 +78,53 @@ def save_tags(path, tags):
             os.unlink(temporary)
 
 
+def lint_destinations(root, destinations):
+    """Read-only recursive check against the configured Genre mappings."""
+    root = Path(root).expanduser()
+    result = {"scanned": 0, "checkedFolders": 0, "skippedFolders": 0, "issues": []}
+
+    def issue(path, expected, actual, problem):
+        result["issues"].append({
+            "path": str(path.absolute()), "file": str(path.relative_to(root)),
+            "expected": expected, "actual": actual, "problem": problem,
+        })
+
+    for destination in destinations:
+        if isinstance(destination, str) or not destination.get("genre"):
+            result["skippedFolders"] += 1
+            continue
+        name, expected = destination["directory"], destination["genre"]
+        if not name or name in (".", "..") or "/" in name:
+            raise ValueError("Invalid destination directory")
+        folder = root / name
+        result["checkedFolders"] += 1
+        if folder.is_symlink() or not folder.is_dir():
+            issue(folder, expected, [], "Destination is missing, not a directory, or a symbolic link")
+            continue
+
+        def walk_error(error):
+            issue(Path(error.filename), expected, [], f"Cannot scan directory: {error}")
+
+        for directory, subdirectories, filenames in os.walk(folder, followlinks=False, onerror=walk_error):
+            directory = Path(directory)
+            subdirectories[:] = sorted(name for name in subdirectories
+                                       if not name.startswith(".") and not (directory / name).is_symlink())
+            for filename in sorted(filenames):
+                path = directory / filename
+                if filename.startswith(".") or path.suffix.lower() != ".mp3" or path.is_symlink():
+                    continue
+                try:
+                    if not path.is_file():
+                        continue
+                    result["scanned"] += 1
+                    actual = [str(value) for frame in tags_for(path).getall("TCON") for value in frame.text]
+                    if actual != [expected]:
+                        issue(path, expected, actual, "Missing Genre" if not actual else "Genre mismatch")
+                except Exception as error:
+                    issue(path, expected, [], f"Cannot read tags: {error}")
+    return result
+
+
 if __name__ == "__main__":
     try:
         action, path = sys.argv[1:3]
@@ -89,6 +136,8 @@ if __name__ == "__main__":
         elif action == "write-genre":
             previous = write_genre(path, json.load(sys.stdin))
             print(json.dumps({"previous": previous}))
+        elif action == "lint":
+            print(json.dumps(lint_destinations(path, json.load(sys.stdin)["destinations"])))
         else:
             raise ValueError("Unknown action")
     except Exception as error:

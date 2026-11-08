@@ -75,6 +75,7 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
     var source: URL?
     var configurationURL: URL!
     var settingsController: SettingsController?
+    var lintController: LintController?
     let destinationButtons = NSStackView()
     let destinationHelp = NSTextField(labelWithString: "")
     let revealButton = NSButton(title: "Show in Finder  ⌘⇧R", target: nil, action: nil)
@@ -210,6 +211,9 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         let reveal = fileMenu.addItem(withTitle: "Show in Finder", action: #selector(showInFinder(_:)), keyEquivalent: "r")
         reveal.keyEquivalentModifierMask = [.command, .shift]
         reveal.target = self
+        fileMenu.addItem(.separator())
+        let lint = fileMenu.addItem(withTitle: "Check destination tags…", action: #selector(checkDestinationTags), keyEquivalent: "")
+        lint.target = self
         file.submenu = fileMenu
         let edit = NSMenuItem()
         menu.addItem(edit)
@@ -271,6 +275,11 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
     @objc func showSettings() {
         if settingsController == nil { settingsController = SettingsController(sorter: self) }
         settingsController?.present()
+    }
+
+    @objc func checkDestinationTags() {
+        if lintController == nil { lintController = LintController(sorter: self) }
+        lintController?.present()
     }
 
     func applySettings(_ updated: Configuration) throws -> Bool {
@@ -616,6 +625,150 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
     func windowShouldClose(_ sender: NSWindow) -> Bool { saveComment() }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply { saveComment() ? .terminateNow : .terminateCancel }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+}
+
+final class LintController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate {
+    unowned let sorter: Sorter
+    let summary = NSTextField(wrappingLabelWithString: "")
+    let rootLabel = NSTextField(labelWithString: "")
+    let table = NSTableView()
+    let scanButton = NSButton(title: "Check again", target: nil, action: nil)
+    let revealButton = NSButton(title: "Show in Finder", target: nil, action: nil)
+    var issues: [[String: Any]] = []
+    var scanning = false
+
+    init(sorter: Sorter) {
+        self.sorter = sorter
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 520), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        super.init(window: window)
+        window.title = "Check destination tags"
+        window.minSize = NSSize(width: 760, height: 400)
+        window.isReleasedWhenClosed = false
+        let content = NSStackView()
+        content.orientation = .vertical
+        content.alignment = .leading
+        content.spacing = 12
+        content.translatesAutoresizingMaskIntoConstraints = false
+        window.contentView!.addSubview(content)
+        NSLayoutConstraint.activate([
+            content.leadingAnchor.constraint(equalTo: window.contentView!.leadingAnchor, constant: 20),
+            content.trailingAnchor.constraint(equalTo: window.contentView!.trailingAnchor, constant: -20),
+            content.topAnchor.constraint(equalTo: window.contentView!.topAnchor, constant: 20),
+            content.bottomAnchor.constraint(equalTo: window.contentView!.bottomAnchor, constant: -20)
+        ])
+        content.addArrangedSubview(NSTextField(labelWithString: "Read-only Genre check • Includes subfolders • No files or tags are changed"))
+        rootLabel.lineBreakMode = .byTruncatingMiddle
+        rootLabel.textColor = .secondaryLabelColor
+        content.addArrangedSubview(rootLabel)
+        content.addArrangedSubview(summary)
+        for (identifier, heading, width) in [("file", "File / directory", 380.0), ("expected", "Expected Genre", 140.0), ("actual", "Actual Genre", 140.0), ("problem", "Issue", 240.0)] {
+            let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(identifier))
+            column.title = heading
+            column.width = width
+            table.addTableColumn(column)
+        }
+        table.delegate = self
+        table.dataSource = self
+        table.rowHeight = 26
+        table.allowsMultipleSelection = false
+        let scroll = NSScrollView()
+        scroll.documentView = table
+        scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = true
+        scroll.borderType = .bezelBorder
+        content.addArrangedSubview(scroll)
+        scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 150).isActive = true
+        scanButton.target = self
+        scanButton.action = #selector(scan)
+        revealButton.target = self
+        revealButton.action = #selector(reveal)
+        revealButton.isEnabled = false
+        let actions = NSStackView(views: [scanButton, revealButton])
+        actions.spacing = 12
+        content.addArrangedSubview(actions)
+        for view in [rootLabel, summary, scroll] {
+            view.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
+        }
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func present() {
+        let wasVisible = window?.isVisible == true
+        if !wasVisible { window?.center() }
+        showWindow(nil)
+        window?.makeKeyAndOrderFront(nil)
+        if !wasVisible { scan() }
+    }
+
+    @objc func scan() {
+        guard !scanning else { return }
+        // Snapshot settings on the main thread; the worker only reads disk.
+        let root = sorter.destinationRoot
+        let configuration: String
+        do {
+            configuration = String(decoding: try JSONEncoder().encode(sorter.configuration!), as: UTF8.self)
+        } catch {
+            summary.stringValue = "Cannot start check: \(error.localizedDescription)"
+            return
+        }
+        scanning = true
+        scanButton.isEnabled = false
+        revealButton.isEnabled = false
+        issues = []
+        table.reloadData()
+        rootLabel.stringValue = root.path
+        summary.stringValue = "Checking destination tags… Playback and sorting remain available."
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            let result = Result { try sorter.helper("lint", file: root, text: configuration) }
+            DispatchQueue.main.async { [self] in
+                scanning = false
+                scanButton.isEnabled = true
+                switch result {
+                case .success(let report):
+                    issues = report["issues"] as? [[String: Any]] ?? []
+                    let scanned = report["scanned"] as? Int ?? 0
+                    let checked = report["checkedFolders"] as? Int ?? 0
+                    let skipped = report["skippedFolders"] as? Int ?? 0
+                    summary.stringValue = "\(scanned) MP3s checked across \(checked) mapped folders. \(issues.count) issues. \(skipped) folders skipped (no Genre mapping). Results are a snapshot; check again after sorting or changing settings."
+                    table.reloadData()
+                case .failure(let error):
+                    summary.stringValue = "Check failed: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int { issues.count }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        let key = tableColumn?.identifier.rawValue ?? "file"
+        let value: String
+        if key == "actual" {
+            let genres = issues[row]["actual"] as? [String] ?? []
+            value = genres.isEmpty ? "—" : genres.joined(separator: " | ")
+        } else {
+            value = issues[row][key] as? String ?? ""
+        }
+        let field = NSTextField(labelWithString: value)
+        field.lineBreakMode = .byTruncatingMiddle
+        field.toolTip = value
+        return field
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        revealButton.isEnabled = !scanning && issues.indices.contains(table.selectedRow)
+    }
+
+    @objc func reveal() {
+        guard issues.indices.contains(table.selectedRow), let path = issues[table.selectedRow]["path"] as? String else { return }
+        var url = URL(fileURLWithPath: path)
+        // Missing files/folders can still be located via the nearest existing parent.
+        while !FileManager.default.fileExists(atPath: url.path), url.path != "/" {
+            url.deleteLastPathComponent()
+        }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
 }
 
 final class SettingsController: NSWindowController {
