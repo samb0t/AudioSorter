@@ -16,6 +16,7 @@ import tempfile
 from mutagen.id3 import COMM, Frames, ID3, TCON
 
 EXTENSIONS = {".mp3", ".wav", ".aif", ".aiff"}
+WAV_GENRE_CONFLICT = "Conflicting WAV RIFF INFO / ID3 Genre (Rekordbox reads IGNR)"
 
 
 def unsupported(message):
@@ -329,7 +330,7 @@ def genre_values(path):
     riff = metadata.info_text(b"IGNR")
     actual = [riff] if riff else []
     if nonempty and values != actual:
-        return actual + ["ID3: " + " | ".join(values)], "Conflicting WAV RIFF INFO / ID3 Genre (Rekordbox reads IGNR)"
+        return actual + ["ID3: " + " | ".join(values)], WAV_GENRE_CONFLICT
     return actual, None
 
 
@@ -369,6 +370,11 @@ def repair_path(root, finding, destinations):
 
 
 def repair_missing_genres(root, findings, configuration):
+    """Legacy missing-only operation; never overwrite a nonempty genre."""
+    return repair_genres(root, findings, configuration, include_wav_conflicts=False)
+
+
+def repair_genres(root, findings, configuration, *, include_wav_conflicts=True):
     """Separate explicit write operation. No move, directory creation, or undo entry.
 
     configuration is a callable so settings are reloaded before each commit.
@@ -377,7 +383,9 @@ def repair_missing_genres(root, findings, configuration):
     for finding in findings:
         result = {"path": finding.get("path", ""), "genre": finding.get("expected", "")}
         try:
-            if finding.get("repairable") is not True or finding.get("problem") != "Missing Genre" or not finding.get("snapshot"):
+            problem = finding.get("problem")
+            is_conflict = include_wav_conflicts and problem == WAV_GENRE_CONFLICT
+            if finding.get("repairable") is not True or (problem != "Missing Genre" and not is_conflict) or not finding.get("snapshot"):
                 raise StaleRepair("Finding is report-only")
 
             def validate():
@@ -388,13 +396,16 @@ def repair_missing_genres(root, findings, configuration):
                 if repair_snapshot(path) != finding["snapshot"]:
                     raise StaleRepair("File changed since check")
                 actual, conflict = genre_values(path)
-                if actual or conflict:
+                if is_conflict:
+                    if path.suffix.lower() != ".wav" or conflict != WAV_GENRE_CONFLICT or actual != finding.get("actual"):
+                        raise StaleRepair("WAV Genre conflict changed since check")
+                elif actual or conflict:
                     raise StaleRepair("Genre is no longer safely missing")
                 return path
 
             path = validate()
             write_genre(path, {"genre": finding["expected"]}, validate=validate)
-            result.update(status="success", detail="Genre filled")
+            result.update(status="success", detail="WAV RIFF INFO and ID3 Genres synchronized" if is_conflict else "Genre filled")
         except (StaleRepair, FileNotFoundError) as error:
             result.update(status="skipped", detail=str(error))
         except Exception as error:
@@ -403,18 +414,65 @@ def repair_missing_genres(root, findings, configuration):
     return {"results": results}
 
 
+def genre_issue(root, path, expected, actual, problem, snapshot=None):
+    return {
+        "path": str(path.absolute()), "file": str(path.relative_to(root)),
+        "expected": expected, "actual": actual, "problem": problem,
+        "repairable": problem in ("Missing Genre", WAV_GENRE_CONFLICT) and snapshot is not None,
+        "snapshot": snapshot,
+    }
+
+
+def lint_file(root, path, expected):
+    """Return a fresh finding, or None only after a verified clean read."""
+    try:
+        snapshot = repair_snapshot(path)
+        actual, problem = genre_values(path)
+        if snapshot != repair_snapshot(path):
+            raise OSError("File changed during check")
+        if problem or actual != [expected]:
+            return genre_issue(root, path, expected, actual,
+                               problem or ("Missing Genre" if not actual else "Genre mismatch"), snapshot)
+    except Exception as error:
+        return genre_issue(root, path, expected, [], f"Cannot read tags: {error}")
+
+
+def recheck_genres(root, findings, configuration):
+    """Read only the attempted paths; never enumerate destination folders."""
+    root = Path(root).expanduser().absolute()
+    config = configuration()
+    if Path(config["destinationRoot"]).expanduser().absolute() != root:
+        raise StaleRepair("Destination root changed; use Check again for a full scan")
+    result = {"checkedPaths": [], "issues": []}
+    for finding in findings:
+        path = Path(finding["path"])
+        expected = finding.get("expected", "")
+        try:
+            relative = path.relative_to(root)
+            matches = [d for d in config["destinations"] if isinstance(d, dict)
+                       and relative.parts and d.get("directory") == relative.parts[0]]
+            if len(matches) != 1 or not matches[0].get("genre"):
+                raise StaleRepair("Genre mapping changed; use Check again for a full scan")
+            expected = matches[0]["genre"]
+            repair_path(root, dict(finding, expected=expected), config["destinations"])
+            issue = lint_file(root, path, expected)
+        except Exception as error:
+            # Preserve even removed or unsafe paths as report-only findings.
+            issue = dict(finding, expected=expected, actual=[], repairable=False,
+                         snapshot=None, problem=f"Cannot recheck file: {error}")
+        result["checkedPaths"].append(str(path))
+        if issue is not None:
+            result["issues"].append(issue)
+    return result
+
+
 def lint_destinations(root, destinations):
     """Read-only recursive check against the configured Genre mappings."""
     root = Path(root).expanduser()
     result = {"scanned": 0, "checkedFolders": 0, "skippedFolders": 0, "issues": []}
 
     def issue(path, expected, actual, problem, snapshot=None):
-        result["issues"].append({
-            "path": str(path.absolute()), "file": str(path.relative_to(root)),
-            "expected": expected, "actual": actual, "problem": problem,
-            "repairable": problem == "Missing Genre" and snapshot is not None,
-            "snapshot": snapshot,
-        })
+        result["issues"].append(genre_issue(root, path, expected, actual, problem, snapshot))
 
     for destination in destinations:
         if isinstance(destination, str) or not destination.get("genre"):
@@ -444,12 +502,9 @@ def lint_destinations(root, destinations):
                     if not path.is_file():
                         continue
                     result["scanned"] += 1
-                    snapshot = repair_snapshot(path)
-                    actual, problem = genre_values(path)
-                    if snapshot != repair_snapshot(path):
-                        raise OSError("File changed during check")
-                    if problem or actual != [expected]:
-                        issue(path, expected, actual, problem or ("Missing Genre" if not actual else "Genre mismatch"), snapshot)
+                    finding = lint_file(root, path, expected)
+                    if finding is not None:
+                        result["issues"].append(finding)
                 except Exception as error:
                     issue(path, expected, [], f"Cannot read tags: {error}")
     return result
@@ -468,11 +523,13 @@ if __name__ == "__main__":
             print(json.dumps({"previous": previous}))
         elif action == "lint":
             print(json.dumps(lint_destinations(path, json.load(sys.stdin)["destinations"])))
-        elif action == "repair-missing-genres":
+        elif action in ("repair-missing-genres", "repair-genres", "recheck-genres"):
             request = json.load(sys.stdin)
             def current_configuration():
                 return json.loads(Path(request["configurationPath"]).read_text())
-            print(json.dumps(repair_missing_genres(path, request["findings"], current_configuration)))
+            repair = {"repair-missing-genres": repair_missing_genres,
+                      "repair-genres": repair_genres, "recheck-genres": recheck_genres}[action]
+            print(json.dumps(repair(path, request["findings"], current_configuration)))
         else:
             raise ValueError("Unknown action")
     except Exception as error:
