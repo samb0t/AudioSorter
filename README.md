@@ -29,7 +29,7 @@ Genre preserves the existing tag. You can also toggle the 30% preview start.
 **Save** writes `config.json` atomically and applies changes immediately; **Cancel**
 discards edits. Changing the configured source loads it without autoplay and
 replaces the previously remembered folder. Destination/Genre changes affect future
-moves and explicitly confirmed missing-Genre repairs only; existing files are not
+moves and explicitly confirmed Genre repairs only; existing files are not
 automatically moved or retagged, and move undo remains available.
 You can still edit the local config manually and restart; no rebuild is needed.
 
@@ -183,20 +183,26 @@ file. Select an issue and click **Show in Finder**; if its path is missing, Find
 reveals the nearest existing parent. **Check again** uses the latest settings.
 Results are a snapshot: check again after sorting, editing tags, or changing
 settings. This checks consistency with your rules, not the musical genre itself.
-Scanning remains read-only. **Fix selected missing Genres…** is enabled when the
-selection contains eligible missing-Genre findings (multiple selection is supported).
+Scanning remains read-only, with an animated status indicator while checking.
+**Repair selected Genres…** is enabled when the selection contains eligible
+missing-Genre findings or WAV RIFF/ID3 conflicts (multiple selection is supported).
 Only those eligible rows are included, even in a mixed selection. The confirmation
-lists every affected file and intended Genre, with **Cancel** as the default.
-Repairs include nested folders and fill absent or empty Genre fields only; whitespace
-or any other nonempty Genre is never replaced. Mismatches, WAV RIFF/ID3 conflicts
-(including ID3-only WAV Genres), malformed/unreadable metadata, and missing
-directories remain report-only. Repairs never create directories or move files.
+lists every affected file, current tags, and intended Genre, with **Cancel** as the
+default. Repairs include nested folders and always use the mapped **Expected Genre**:
+- Missing-Genre repairs fill absent or empty fields only.
+- WAV RIFF/ID3 conflict repairs (including ID3-only WAV Genres) **overwrite both
+  RIFF INFO `IGNR` and ID3 `TCON`** to match Expected Genre, even if neither existing
+  value matches it. Existing ID3 versions and unrelated metadata are preserved.
+
+Other Genre mismatches (including whitespace-only tags without a WAV conflict),
+malformed/unreadable metadata, and missing directories remain report-only.
+The selection hint explains eligibility. Repairs never create directories or move files.
 
 The separate background write operation rechecks the current on-disk configuration,
 file identity/content snapshot, path containment, symlinks, and current tags before
 each write and again before atomic replacement. Stale findings or changed mappings
 are skipped. MP3/AIFF use ID3 `TCON`; WAV uses RIFF INFO `IGNR` and synchronizes an
-existing empty ID3 Genre. The same lossless, verified same-directory writer used by
+existing ID3 Genre. The same lossless, verified same-directory writer used by
 sorting preserves audio payloads, artwork, DJ metadata, and unrelated frames/chunks;
 audio is never re-encoded. Existing WAV ASCII-only and unsupported-layout limits apply.
 
@@ -204,8 +210,14 @@ While repairs run, sorting, comment saves, Trash, move undo, settings saves, and
 track/folder changes that would save comments are temporarily blocked. Playback
 controls remain available, and repairs do not save/discard pending text, change the
 current track/selection, or restart playback. A second repair cannot run concurrently.
-Per-file successes, skips, and failures remain in the results window beneath the
-fresh read-only scan, which uses current settings. A failed file does not stop the rest.
+Per-file successes, skips, and failures remain in the results window. After repair,
+only the attempted files are rechecked against current on-disk mappings: resolved
+rows disappear, and remaining issues get fresh tags and file snapshots. Unrelated
+rows, surviving selections, and the scroll position are preserved; destination
+folders are not enumerated again. The summary makes clear that untouched results
+remain snapshots. **Check again** still performs a full scan using current settings.
+If a targeted recheck fails, previous rows are retained with a warning rather than
+assumed resolved. A failed file does not stop the rest.
 
 **Repair undo:** there is no app undo for these explicit repairs; keep backups.
 Repairs neither add to nor clear/change the existing move/Genre undo stack. Undo Move

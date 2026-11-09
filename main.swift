@@ -308,7 +308,7 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
             UserDefaults.standard.removeObject(forKey: "source")
             loadFolder(Configuration.expand(updated.sourceFolder), autoplay: false)
         } else {
-            status.stringValue = "Settings saved. Destination and Genre changes apply to future moves and confirmed missing-Genre repairs."
+            status.stringValue = "Settings saved. Destination and Genre changes apply to future moves and confirmed Genre repairs."
         }
         return true
     }
@@ -718,7 +718,10 @@ final class LintController: NSWindowController, NSTableViewDataSource, NSTableVi
     let table = NSTableView()
     let scanButton = NSButton(title: "Check again", target: nil, action: nil)
     let revealButton = NSButton(title: "Show in Finder", target: nil, action: nil)
-    let fixButton = NSButton(title: "Fix selected missing Genres…", target: nil, action: nil)
+    let fixButton = NSButton(title: "Repair selected Genres…", target: nil, action: nil)
+    let wavGenreConflict = "Conflicting WAV RIFF INFO / ID3 Genre (Rekordbox reads IGNR)"
+    let activityIndicator = NSProgressIndicator()
+    let repairHint = NSTextField(wrappingLabelWithString: "Select Missing Genre or WAV RIFF/ID3 conflicts to repair. Genre mismatches and unreadable tags are report-only.")
     let repairReport = NSTextView()
     var issues: [[String: Any]] = []
     var scanning = false
@@ -746,7 +749,14 @@ final class LintController: NSWindowController, NSTableViewDataSource, NSTableVi
         rootLabel.lineBreakMode = .byTruncatingMiddle
         rootLabel.textColor = .secondaryLabelColor
         content.addArrangedSubview(rootLabel)
-        content.addArrangedSubview(summary)
+        activityIndicator.style = .spinning
+        activityIndicator.controlSize = .small
+        activityIndicator.isIndeterminate = true
+        activityIndicator.isDisplayedWhenStopped = false
+        activityIndicator.setAccessibilityLabel("Checking destination tags")
+        let scanStatus = NSStackView(views: [activityIndicator, summary])
+        scanStatus.spacing = 8
+        content.addArrangedSubview(scanStatus)
         for (identifier, heading, width) in [("file", "File / directory", 380.0), ("expected", "Expected Genre", 140.0), ("actual", "Actual Genre", 140.0), ("problem", "Issue", 240.0)] {
             let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(identifier))
             column.title = heading
@@ -775,6 +785,8 @@ final class LintController: NSWindowController, NSTableViewDataSource, NSTableVi
         let actions = NSStackView(views: [scanButton, revealButton, fixButton])
         actions.spacing = 12
         content.addArrangedSubview(actions)
+        repairHint.textColor = .secondaryLabelColor
+        content.addArrangedSubview(repairHint)
         repairReport.isEditable = false
         repairReport.isRichText = false
         repairReport.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
@@ -788,7 +800,7 @@ final class LintController: NSWindowController, NSTableViewDataSource, NSTableVi
         content.addArrangedSubview(reportScroll)
         reportScroll.heightAnchor.constraint(equalToConstant: 90).isActive = true
         reportScroll.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
-        for view in [rootLabel, summary, scroll] {
+        for view in [rootLabel, scanStatus, scroll, repairHint] {
             view.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
         }
     }
@@ -815,6 +827,8 @@ final class LintController: NSWindowController, NSTableViewDataSource, NSTableVi
             return
         }
         scanning = true
+        activityIndicator.setAccessibilityLabel("Checking destination tags")
+        activityIndicator.startAnimation(nil)
         scanButton.isEnabled = false
         revealButton.isEnabled = false
         fixButton.isEnabled = false
@@ -822,10 +836,12 @@ final class LintController: NSWindowController, NSTableViewDataSource, NSTableVi
         table.reloadData()
         rootLabel.stringValue = root.path
         summary.stringValue = "Checking destination tags… Playback and sorting remain available."
+        updateSelectionStatus()
         DispatchQueue.global(qos: .userInitiated).async { [self] in
             let result = Result { try sorter.helper("lint", file: root, text: configuration) }
             DispatchQueue.main.async { [self] in
                 scanning = false
+                activityIndicator.stopAnimation(nil)
                 scanButton.isEnabled = true
                 switch result {
                 case .success(let report):
@@ -838,6 +854,7 @@ final class LintController: NSWindowController, NSTableViewDataSource, NSTableVi
                 case .failure(let error):
                     summary.stringValue = "Check failed: \(error.localizedDescription)"
                 }
+                updateSelectionStatus()
             }
         }
     }
@@ -860,14 +877,33 @@ final class LintController: NSWindowController, NSTableViewDataSource, NSTableVi
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
+        updateSelectionStatus()
+    }
+
+    func updateSelectionStatus() {
         revealButton.isEnabled = !scanning && issues.indices.contains(table.selectedRow)
-        fixButton.isEnabled = !scanning && !sorter.repairingGenres && !selectedRepairs.isEmpty
+        let eligible = selectedRepairs.count
+        fixButton.isEnabled = !scanning && !sorter.repairingGenres && eligible > 0
+        if scanning {
+            repairHint.stringValue = "Repairs are unavailable while checking files."
+        } else if sorter.repairingGenres {
+            repairHint.stringValue = "Repairs are in progress. File changes are temporarily unavailable."
+        } else if eligible > 0 {
+            let conflicts = selectedRepairs.filter { $0["problem"] as? String == wavGenreConflict }.count
+            repairHint.stringValue = "\(eligible) selected files eligible (\(conflicts) WAV conflicts). Repairs use Expected Genre; WAV conflicts overwrite both RIFF and ID3 Genres. Other selected issues will be skipped."
+        } else if table.selectedRow >= 0 {
+            repairHint.stringValue = "No selected files are eligible. Only Missing Genre and WAV RIFF/ID3 conflicts can be repaired; other issues are report-only."
+        } else {
+            repairHint.stringValue = "Select Missing Genre or WAV RIFF/ID3 conflicts to repair. Genre mismatches and unreadable tags are report-only."
+        }
+        fixButton.toolTip = repairHint.stringValue
     }
 
     var selectedRepairs: [[String: Any]] {
         table.selectedRowIndexes.compactMap { row in
             guard issues.indices.contains(row), issues[row]["repairable"] as? Bool == true,
-                  issues[row]["problem"] as? String == "Missing Genre" else { return nil }
+                  let problem = issues[row]["problem"] as? String,
+                  problem == "Missing Genre" || problem == wavGenreConflict else { return nil }
             return issues[row]
         }
     }
@@ -878,8 +914,8 @@ final class LintController: NSWindowController, NSTableViewDataSource, NSTableVi
         guard !findings.isEmpty else { return }
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "Fill missing Genres in \(findings.count) selected files?"
-        alert.informativeText = "Only eligible selected findings are included. Each file and mapping will be revalidated before writing. No files are moved or directories created. This repair has no app undo; the existing Undo Move history is unchanged. Keep backups."
+        alert.messageText = "Repair Genres in \(findings.count) selected files?"
+        alert.informativeText = "Use the mapped Expected Genre. Missing Genres will be filled; WAV RIFF/ID3 conflicts will have BOTH genre tags overwritten to match it, even if neither currently matches. Only eligible selected findings are included. Each file and mapping will be revalidated before writing. No files are moved or directories created. This repair has no app undo; the existing Undo Move history is unchanged. Keep backups."
         let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 650, height: 240))
         let list = NSTextView(frame: scroll.bounds)
         list.isEditable = false
@@ -888,12 +924,16 @@ final class LintController: NSWindowController, NSTableViewDataSource, NSTableVi
         list.isHorizontallyResizable = false
         list.autoresizingMask = [.width]
         list.textContainer?.widthTracksTextView = true
-        list.string = findings.map { "\($0["path"] as? String ?? "")\n  → Genre: \($0["expected"] as? String ?? "")" }.joined(separator: "\n\n")
+        list.string = findings.map {
+            let actual = ($0["actual"] as? [String] ?? []).joined(separator: " | ")
+            let operation = $0["problem"] as? String == wavGenreConflict ? "Replace RIFF + ID3" : "Fill missing Genre"
+            return "\($0["path"] as? String ?? "")\n  Current: \(actual.isEmpty ? "—" : actual)\n  \(operation) → Genre: \($0["expected"] as? String ?? "")"
+        }.joined(separator: "\n\n")
         scroll.documentView = list
         scroll.hasVerticalScroller = true
         alert.accessoryView = scroll
         alert.addButton(withTitle: "Cancel").keyEquivalent = "\r"
-        alert.addButton(withTitle: "Fix missing Genres").keyEquivalent = ""
+        alert.addButton(withTitle: "Repair Genres").keyEquivalent = ""
         guard alert.runModal() == .alertSecondButtonReturn else { return }
         startRepair(findings)
     }
@@ -910,13 +950,24 @@ final class LintController: NSWindowController, NSTableViewDataSource, NSTableVi
             return
         }
         sorter.repairingGenres = true
+        activityIndicator.setAccessibilityLabel("Repairing Genres")
+        activityIndicator.startAnimation(nil)
         scanButton.isEnabled = false
         fixButton.isEnabled = false
-        summary.stringValue = "Repairing missing Genres… Playback and pending comment text are unchanged. File changes are temporarily unavailable."
+        summary.stringValue = "Repairing Genres… Playback and pending comment text are unchanged. File changes are temporarily unavailable."
+        updateSelectionStatus()
         DispatchQueue.global(qos: .userInitiated).async { [self] in
-            let result = Result { try sorter.helper("repair-missing-genres", file: root, text: request) }
+            let result = Result { try sorter.helper("repair-genres", file: root, text: request) }
+            DispatchQueue.main.async { [self] in
+                activityIndicator.setAccessibilityLabel("Rechecking repaired files")
+                summary.stringValue = "Rechecking only the attempted files… Other results will remain unchanged."
+            }
+            // Recheck even if the repair process failed: some writes may have completed.
+            let recheck = Result { try sorter.helper("recheck-genres", file: root, text: request) }
             DispatchQueue.main.async { [self] in
                 sorter.repairingGenres = false
+                activityIndicator.stopAnimation(nil)
+                scanButton.isEnabled = true
                 switch result {
                 case .success(let report):
                     let results = report["results"] as? [[String: Any]] ?? []
@@ -927,11 +978,50 @@ final class LintController: NSWindowController, NSTableViewDataSource, NSTableVi
                         "\($0["status"] as? String ?? "failed"): \($0["path"] as? String ?? "") → \($0["genre"] as? String ?? ""): \($0["detail"] as? String ?? "")"
                     }.joined(separator: "\n")
                 case .failure(let error):
-                    repairReport.string = "Repair process failed: \(error.localizedDescription). Check again for current file state."
+                    repairReport.string = "Repair process failed: \(error.localizedDescription). See the targeted recheck for current file state."
                 }
                 // Never refresh the sorting queue, load a track, save comments, or touch undo.
-                scan()
+                do {
+                    try applyRecheck(try recheck.get(), findings: findings)
+                    summary.stringValue = "\(issues.count) issues shown. Rechecked \(findings.count) attempted files only. Other results remain snapshots; Check again performs a full scan."
+                } catch {
+                    summary.stringValue = "Targeted recheck failed: \(error.localizedDescription). Previous rows retained; use Check again for current file state."
+                    repairReport.string += "\nTargeted recheck failed: \(error.localizedDescription)"
+                }
+                updateSelectionStatus()
             }
+        }
+    }
+
+    func applyRecheck(_ report: [String: Any], findings: [[String: Any]]) throws {
+        let attempted = Set(findings.compactMap { $0["path"] as? String })
+        guard let checked = report["checkedPaths"] as? [String], Set(checked) == attempted,
+              let refreshed = report["issues"] as? [[String: Any]],
+              refreshed.allSatisfy({ finding in
+                  guard let path = finding["path"] as? String else { return false }
+                  return attempted.contains(path)
+              }) else {
+            throw NSError(domain: "AudioSorter", code: 5, userInfo: [NSLocalizedDescriptionKey: "Incomplete file recheck"])
+        }
+        let selectedPaths = Set(table.selectedRowIndexes.compactMap { row in
+            issues.indices.contains(row) ? issues[row]["path"] as? String : nil
+        })
+        let clip = table.enclosingScrollView?.contentView
+        let origin = clip?.bounds.origin
+        let byPath = Dictionary(grouping: refreshed) { $0["path"] as! String }
+        // Replace attempted rows in place; preserve every unrelated finding verbatim.
+        issues = issues.flatMap { finding -> [[String: Any]] in
+            guard let path = finding["path"] as? String, attempted.contains(path) else { return [finding] }
+            return byPath[path] ?? []
+        }
+        table.reloadData()
+        table.selectRowIndexes(IndexSet(issues.indices.filter { row in
+            guard let path = issues[row]["path"] as? String else { return false }
+            return selectedPaths.contains(path)
+        }), byExtendingSelection: false)
+        if let clip, let origin {
+            clip.scroll(to: clip.constrainBoundsRect(NSRect(origin: origin, size: clip.bounds.size)).origin)
+            table.enclosingScrollView?.reflectScrolledClipView(clip)
         }
     }
 
@@ -981,7 +1071,7 @@ final class SettingsController: NSWindowController {
             line.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
         }
         content.addArrangedSubview(NSTextField(labelWithString: "Destinations / genre mapping (in keyboard shortcut order)"))
-        let hint = NSTextField(wrappingLabelWithString: "Sorting creates folders inside the destination parent. Leave Genre blank to preserve the existing tag. Changes affect future moves and explicitly confirmed missing-Genre repairs, never existing tags automatically.")
+        let hint = NSTextField(wrappingLabelWithString: "Sorting creates folders inside the destination parent. Leave Genre blank to preserve the existing tag. Changes affect future moves and explicitly confirmed Genre repairs, never existing tags automatically.")
         hint.textColor = .secondaryLabelColor
         content.addArrangedSubview(hint)
         hint.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true

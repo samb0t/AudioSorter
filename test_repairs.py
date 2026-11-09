@@ -1,4 +1,4 @@
-"""Confirmed missing-Genre operations; disposable fixtures only."""
+"""Confirmed Genre operations; disposable fixtures only."""
 import json
 from pathlib import Path
 import shutil
@@ -10,8 +10,8 @@ from unittest.mock import patch
 
 from mutagen.id3 import TCON
 
-from comments import (AudioMetadata, genre_values, lint_destinations,
-                      repair_missing_genres, synchsafe, write_comment, write_genre)
+from comments import (AudioMetadata, WAV_GENRE_CONFLICT, genre_values, lint_destinations,
+                      recheck_genres, repair_genres, repair_missing_genres, synchsafe, write_comment, write_genre)
 from test_formats import fixture, rich_tags
 
 
@@ -29,6 +29,199 @@ class RepairTests(unittest.TestCase):
 
     def repair(self, findings):
         return repair_missing_genres(self.root, findings, lambda: self.config)["results"]
+
+    def repair_all(self, findings):
+        return repair_genres(self.root, findings, lambda: self.config)["results"]
+
+    def conflict(self, name="conflict.wav", riff="Breaks", values=("Techno",)):
+        path = self.root / "House/nested" / name
+        tags = rich_tags()
+        tags.add(TCON(encoding=1, text=list(values)))
+        info = [(b"ICMT", b"Keep comment\0"), (b"INAM", b"Keep title\0")]
+        if riff is not None:
+            info.append((b"IGNR", (riff + "\0").encode("ascii")))
+        fixture(path, tags, info)
+        return path
+
+    def test_targeted_recheck_reads_only_attempted_files_without_walking(self):
+        repaired = self.conflict("repaired.wav")
+        failed = self.conflict("failed.wav")
+        untouched = self.conflict("untouched.wav")
+        findings = [f for f in self.scan() if f["path"] != str(untouched)]
+        write_genre(repaired, {"genre": "House"})
+        write_comment(failed, "Changed since scan")
+        with patch("comments.os.walk", side_effect=AssertionError("Must not walk")), \
+                patch("comments.genre_values", wraps=genre_values) as reads:
+            report = recheck_genres(self.root, findings, lambda: self.config)
+        self.assertEqual(set(report["checkedPaths"]), {str(repaired), str(failed)})
+        self.assertEqual([call.args[0] for call in reads.call_args_list], [Path(f["path"]) for f in findings])
+        self.assertEqual(len(report["issues"]), 1)
+        refreshed = report["issues"][0]
+        self.assertEqual(refreshed["path"], str(failed))
+        self.assertTrue(refreshed["repairable"])
+        old = next(f for f in findings if f["path"] == str(failed))
+        self.assertNotEqual(refreshed["snapshot"], old["snapshot"])
+        self.assertEqual(self.repair_all([refreshed])[0]["status"], "success")
+
+    def test_targeted_recheck_uses_current_mapping_and_reports_missing_files(self):
+        path = self.conflict()
+        findings = self.scan()
+        self.config["destinations"][0]["genre"] = "Techno"
+        report = recheck_genres(self.root, findings, lambda: self.config)
+        self.assertEqual(report["issues"][0]["expected"], "Techno")
+        path.unlink()
+        report = recheck_genres(self.root, findings, lambda: self.config)
+        self.assertEqual(report["checkedPaths"], [str(path)])
+        self.assertFalse(report["issues"][0]["repairable"])
+        self.assertIn("Cannot recheck file", report["issues"][0]["problem"])
+        self.config["destinations"] = []
+        report = recheck_genres(self.root, findings, lambda: self.config)
+        self.assertIn("Genre mapping changed", report["issues"][0]["problem"])
+        self.config["destinationRoot"] = str(self.root / "elsewhere")
+        with self.assertRaisesRegex(ValueError, "Destination root changed"):
+            recheck_genres(self.root, findings, lambda: self.config)
+
+    def test_targeted_recheck_does_not_read_symlink_or_outside_paths(self):
+        path = self.conflict()
+        finding = self.scan()[0]
+        outside = self.root / "outside.wav"
+        outside.write_bytes(path.read_bytes())
+        path.unlink()
+        path.symlink_to(outside)
+        with patch("comments.genre_values", side_effect=AssertionError("Unsafe read")) as reads:
+            report = recheck_genres(self.root, [finding, dict(finding, path=str(outside))], lambda: self.config)
+        reads.assert_not_called()
+        self.assertEqual(len(report["issues"]), 2)
+        self.assertTrue(all(not f["repairable"] for f in report["issues"]))
+
+    def test_cli_targeted_recheck(self):
+        path = self.conflict()
+        findings = self.scan()
+        write_genre(path, {"genre": "House"})
+        config_path = self.root / "config.json"
+        config_path.write_text(json.dumps(self.config))
+        completed = subprocess.run([sys.executable, str(Path(__file__).with_name("comments.py")),
+                                    "recheck-genres", str(self.root)],
+                                   input=json.dumps({"findings": findings, "configurationPath": str(config_path)}),
+                                   capture_output=True, text=True)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(json.loads(completed.stdout), {"checkedPaths": [str(path)], "issues": []})
+
+    def test_wav_conflicts_synchronize_both_tags_and_preserve_other_bytes(self):
+        for name, riff, values in [
+            ("id3-only.wav", None, ("House",)),
+            ("empty-riff.wav", "", ("Techno",)),
+            ("riff-correct.wav", "House", ("Breaks",)),
+            ("id3-correct.wav", "Breaks", ("House",)),
+            ("neither-correct.WAV", "Breaks", ("Techno", "Minimal")),
+        ]:
+            self.conflict(name, riff, values)
+        before = {p: AudioMetadata(p) for p in (self.root / "House/nested").iterdir()}
+        findings = self.scan()
+        self.assertEqual(len(findings), 5)
+        self.assertTrue(all(f["repairable"] and f["problem"] == WAV_GENRE_CONFLICT for f in findings))
+        results = self.repair_all(findings)
+        self.assertEqual([r["status"] for r in results], ["success"] * 5)
+        self.assertTrue(all("synchronized" in r["detail"] for r in results))
+        self.assertEqual(self.scan(), [])
+        for path, old in before.items():
+            new = AudioMetadata(path)
+            self.assertEqual(genre_values(path), (["House"], None))
+            self.assertEqual(new.info_value(b"IGNR"), b"House\0")
+            self.assertEqual(new.block.tags()["TCON"].text, ["House"])
+            self.assertEqual(new.block.version, old.block.version)
+            self.assertEqual([f for f in new.block.frames if f[:4] != b"TCON"],
+                             [f for f in old.block.frames if f[:4] != b"TCON"])
+            self.assertEqual([raw for key, _, raw in new.parts if key.lower() not in (b"id3 ", b"list")],
+                             [raw for key, _, raw in old.parts if key.lower() not in (b"id3 ", b"list")])
+            self.assertEqual([raw for key, _, raw in new.info if key != b"IGNR"],
+                             [raw for key, _, raw in old.info if key != b"IGNR"])
+        self.assertTrue(all(r["status"] == "skipped" for r in self.repair_all(findings)))
+
+    def test_mixed_repair_leaves_mismatches_and_malformed_tags_untouched(self):
+        self.conflict()
+        fixture(self.root / "House/missing.mp3")
+        wrong = self.root / "House/wrong.wav"
+        fixture(wrong, info=[(b"IGNR", b"Breaks\0")])
+        bad = self.root / "House/bad.wav"
+        fixture(bad, info=[(b"IGNR", b"unterminated")])
+        before = {p: p.read_bytes() for p in (wrong, bad)}
+        findings = self.scan()
+        results = self.repair_all(findings)
+        self.assertEqual(sorted(r["status"] for r in results), ["skipped", "skipped", "success", "success"])
+        # Forging eligibility cannot turn a mismatch or a read error into a repair.
+        for finding in self.scan():
+            forged = dict(finding, repairable=True, problem=WAV_GENRE_CONFLICT)
+            self.assertNotEqual(self.repair_all([forged])[0]["status"], "success")
+        for path, data in before.items():
+            self.assertEqual(path.read_bytes(), data)
+
+    def test_conflict_repair_revalidates_file_mapping_and_paths(self):
+        path = self.conflict()
+        finding = self.scan()[0]
+        original = path.read_bytes()
+        self.config["destinations"][0]["genre"] = "Other"
+        self.assertEqual(self.repair_all([finding])[0]["status"], "skipped")
+        self.config["destinations"][0]["genre"] = "House"
+        self.config["destinationRoot"] = str(self.root / "other")
+        self.assertEqual(self.repair_all([finding])[0]["status"], "skipped")
+        self.config["destinationRoot"] = str(self.root)
+        self.assertEqual(self.repair_all([dict(finding, actual=["forged"])])[0]["status"], "skipped")
+        write_comment(path, "External edit")
+        self.assertEqual(self.repair_all([finding])[0]["status"], "skipped")
+        path.write_bytes(original)
+        finding = self.scan()[0]
+        outside = self.root / "outside.wav"
+        outside.write_bytes(original)
+        self.assertEqual(self.repair_all([dict(finding, path=str(outside))])[0]["status"], "skipped")
+        path.unlink()
+        path.symlink_to(outside)
+        self.assertEqual(self.repair_all([finding])[0]["status"], "skipped")
+        self.assertEqual(outside.read_bytes(), original)
+
+    def test_conflict_failure_and_commit_revalidation_are_atomic(self):
+        path = self.conflict()
+        findings = self.scan()
+        original = path.read_bytes()
+        with patch("comments.os.replace", side_effect=OSError("disk full")):
+            self.assertEqual(self.repair_all(findings)[0]["status"], "failed")
+        self.assertEqual(path.read_bytes(), original)
+        def change_mapping(fd):
+            self.config["destinations"][0]["genre"] = "Other"
+        with patch("comments.os.fsync", side_effect=change_mapping):
+            self.assertEqual(self.repair_all(findings)[0]["status"], "skipped")
+        self.assertEqual(path.read_bytes(), original)
+        self.config["destinations"][0]["genre"] = "House"
+        import comments
+        fsync = comments.os.fsync
+        def external_edit(fd):
+            with patch("comments.os.fsync", side_effect=fsync):
+                write_genre(path, {"genre": "External"})
+        with patch("comments.os.fsync", side_effect=external_edit):
+            self.assertEqual(self.repair_all(findings)[0]["status"], "failed")
+        self.assertEqual(genre_values(path), (["External"], None))
+        self.assertFalse(list(self.root.rglob(".audio-sorter-*")))
+
+    def test_conflict_unicode_mapping_fails_without_modifying_file(self):
+        path = self.conflict()
+        self.config["destinations"][0]["genre"] = "Électronique"
+        findings = self.scan()
+        original = path.read_bytes()
+        self.assertEqual(self.repair_all(findings)[0]["status"], "failed")
+        self.assertEqual(path.read_bytes(), original)
+        self.assertFalse(list(self.root.rglob(".audio-sorter-*")))
+
+    def test_cli_conflict_repair(self):
+        path = self.conflict()
+        config_path = self.root / "config.json"
+        config_path.write_text(json.dumps(self.config))
+        completed = subprocess.run([sys.executable, str(Path(__file__).with_name("comments.py")),
+                                    "repair-genres", str(self.root)],
+                                   input=json.dumps({"findings": self.scan(), "configurationPath": str(config_path)}),
+                                   capture_output=True, text=True)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(json.loads(completed.stdout)["results"][0]["status"], "success")
+        self.assertEqual(genre_values(path), (["House"], None))
 
     def test_all_formats_absent_empty_nested_and_preservation(self):
         for ext in [".mp3", ".wav", ".aif", ".aiff"]:
@@ -107,10 +300,10 @@ class RepairTests(unittest.TestCase):
             fixture(wrong, tags)
         findings = self.scan()
         self.assertEqual(len(findings), 4)
-        self.assertFalse(any(f["repairable"] for f in findings))
+        self.assertEqual(sum(f["repairable"] for f in findings), 1)  # WAV ID3-only conflict.
         self.assertTrue(all(r["status"] == "skipped" for r in self.repair(findings)))
 
-    def test_report_only_conflicts_mismatches_malformed_unreadable_missing_directories(self):
+    def test_legacy_missing_only_repair_rejects_conflicts_and_other_issues(self):
         folder = self.root / "House"
         for name, riff, id3 in [("id3-only", None, "House"), ("conflict", "Breaks", "House"),
                                  ("wrong", "Breaks", None), ("space", " ", None)]:
@@ -126,7 +319,7 @@ class RepairTests(unittest.TestCase):
         before = {p: p.read_bytes() for p in folder.iterdir() if p.is_file()}
         findings = self.scan()
         self.assertEqual(len(findings), 8)
-        self.assertFalse(any(f["repairable"] for f in findings))
+        self.assertEqual(sum(f["repairable"] for f in findings), 2)
         self.assertTrue(all(r["status"] == "skipped" for r in self.repair(findings)))
         self.assertFalse((self.root / "Absent").exists())
         for path, data in before.items():
@@ -239,3 +432,10 @@ class RepairTests(unittest.TestCase):
             before = payload()
             self.assertEqual(self.repair(self.scan())[0]["status"], "success")
             self.assertEqual(payload(), before)
+            if ext == ".wav":
+                metadata = AudioMetadata(path)
+                metadata.block.replace(b"TCON", metadata.block.encode(TCON(encoding=3, text=["Breaks"])))
+                metadata.save(edit_id3=True)
+                self.assertEqual(self.repair_all(self.scan())[0]["status"], "success")
+                self.assertEqual(genre_values(path), (["House"], None))
+                self.assertEqual(payload(), before)
