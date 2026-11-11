@@ -9,6 +9,48 @@ import unittest
 
 @unittest.skipUnless(shutil.which("swift"), "Swift unavailable")
 class NativeTests(unittest.TestCase):
+    def test_current_genre_display_and_clearing(self):
+        source = Path(__file__).with_name("main.swift").read_text().split("let app = NSApplication.shared", 1)[0]
+        source = source.replace("final class Sorter:", "class Sorter:")
+        harness = r'''
+class TestSorter: Sorter {
+    var response: [String: Any] = [:]
+    var fail = false
+    override func helper(_ action: String, file: URL, text: String? = nil) throws -> [String: Any] {
+        assert(action == "read-genre" && file.path == "/unused/track.wav")
+        if fail { throw NSError(domain: "test", code: 1, userInfo: [NSLocalizedDescriptionKey: "unreadable genre"]) }
+        return response
+    }
+}
+let app = NSApplication.shared
+let sorter = TestSorter()
+sorter.files = [URL(fileURLWithPath: "/unused/track.wav")]
+sorter.index = 0
+sorter.response = ["genres": ["House", "Deep House"]]
+sorter.refreshGenre()
+assert(!sorter.genreLabel.isHidden && sorter.genreLabel.stringValue == "Genre: House | Deep House")
+assert(sorter.genreLabel.toolTip == sorter.genreLabel.stringValue)
+sorter.response = ["genres": ["Breaks", "ID3: House"], "warning": "Conflicting tags"]
+sorter.refreshGenre()
+assert(sorter.genreLabel.stringValue == "Genre: Breaks | ID3: House")
+assert(sorter.genreLabel.toolTip == "Conflicting tags")
+sorter.response = ["genres": ["", "  "]]
+sorter.refreshGenre()
+assert(sorter.genreLabel.isHidden && sorter.genreLabel.stringValue.isEmpty)
+sorter.fail = true
+sorter.refreshGenre()
+assert(!sorter.genreLabel.isHidden && sorter.genreLabel.stringValue == "Genre: unavailable")
+assert(sorter.genreLabel.toolTip == "unreadable genre")
+sorter.clear()
+assert(sorter.genreLabel.isHidden && sorter.genreLabel.stringValue.isEmpty)
+assert(sorter.genreLabel.toolTip == nil)
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            script = Path(directory) / "main.swift"
+            script.write_text(source + harness)
+            result = subprocess.run(["swift", str(script)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_targeted_recheck_failure_retains_rows_without_full_scan(self):
         source = Path(__file__).with_name("main.swift").read_text().split("let app = NSApplication.shared", 1)[0]
         source = source.replace("final class Sorter:", "class Sorter:")
@@ -268,7 +310,7 @@ import Foundation
 import AVFoundation
 enum State { case on, off }
 class Toggle { var state = State.off }
-class Field { var string = ""; var stringValue = ""; var isEditable = false }
+class Field { var string = ""; var stringValue = ""; var isEditable = false; var isHidden = false; var toolTip: String? }
 class Table { func reloadData() {} }
 class Defaults {
     static let standard = Defaults()
@@ -280,6 +322,7 @@ class Sorter {
     let configuration = Configuration()
     let table = Table()
     let folderLabel = Field(), status = Field(), title = Field(), comment = Field()
+    let genreLabel = Field()
     let names = ["House"]
     var source: URL?
     var files: [URL] = []

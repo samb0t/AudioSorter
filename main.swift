@@ -66,6 +66,7 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
     var window: NSWindow!
     let table = NSTableView()
     let title = NSTextField(labelWithString: "Choose a folder to begin")
+    let genreLabel = NSTextField(labelWithString: "")
     let folderLabel = NSTextField(labelWithString: "")
     let status = NSTextField(labelWithString: "No files are moved until you press a destination key.")
     let time = NSTextField(labelWithString: "0:00 / 0:00")
@@ -148,6 +149,10 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         title.font = .systemFont(ofSize: 20, weight: .semibold)
         title.lineBreakMode = .byTruncatingMiddle
         root.addArrangedSubview(title)
+        genreLabel.textColor = .secondaryLabelColor
+        genreLabel.lineBreakMode = .byTruncatingTail
+        genreLabel.isHidden = true
+        root.addArrangedSubview(genreLabel)
         slider.target = self
         slider.action = #selector(seek)
         let transport = NSStackView(views: [button("Play / pause  ↵", #selector(playPause)), slider, time])
@@ -182,7 +187,7 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         status.textColor = .secondaryLabelColor
         status.lineBreakMode = .byTruncatingMiddle
         root.addArrangedSubview(status)
-        for view in [folderRow, list, title, transport, commentScroll, destinations, status] {
+        for view in [folderRow, list, title, genreLabel, transport, commentScroll, destinations, status] {
             view.widthAnchor.constraint(equalTo: root.widthAnchor).isActive = true
         }
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
@@ -420,6 +425,7 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
             table.reloadData()
             loading = false
             if retainedIndex != nil {
+                refreshGenre()
                 highlight()
                 status.stringValue = "Refreshed. \(files.count) audio files ready. Current track and playback position preserved."
             }
@@ -448,6 +454,7 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         player = nil
         index = newIndex
         title.stringValue = files[index].lastPathComponent
+        refreshGenre()
         comment.string = ""
         originalComment = ""
         commentReadable = false
@@ -466,6 +473,25 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         } catch { report(error) }
         highlight()
         updateTime()
+    }
+
+    func refreshGenre() {
+        genreLabel.stringValue = ""
+        genreLabel.toolTip = nil
+        genreLabel.isHidden = true
+        guard files.indices.contains(index) else { return }
+        do {
+            let data = try helper("read-genre", file: files[index])
+            let genres = (data["genres"] as? [String] ?? []).filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            guard !genres.isEmpty else { return }
+            genreLabel.stringValue = "Genre: " + genres.joined(separator: " | ")
+            genreLabel.toolTip = data["warning"] as? String ?? genreLabel.stringValue
+        } catch {
+            // A genre read failure must not prevent playback or comment editing.
+            genreLabel.stringValue = "Genre: unavailable"
+            genreLabel.toolTip = error.localizedDescription
+        }
+        genreLabel.isHidden = false
     }
 
     func highlight() {
@@ -693,6 +719,7 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         player?.stop()
         player = nil
         index = -1
+        refreshGenre()
         originalComment = ""
         comment.string = ""
         title.stringValue = "End of list"

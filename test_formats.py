@@ -1,9 +1,11 @@
 """Lossless container/tag tests. Fixtures are created only in temporary folders."""
 import io
+import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -60,6 +62,25 @@ class FormatTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
+
+    def test_read_genre_cli_is_read_only(self):
+        for extension in [".mp3", ".wav", ".aif", ".aiff"]:
+            for present in [False, True]:
+                with self.subTest(extension=extension, present=present):
+                    path = self.root / ("track" + extension)
+                    tags = ID3()
+                    if present:
+                        tags.add(TCON(encoding=3, text=["House", "Deep House"]))
+                    fixture(path, tags, [(b"IGNR", b"Breaks\0")] if extension == ".wav" and present else ())
+                    before = path.read_bytes()
+                    result = subprocess.run([sys.executable, str(Path(__file__).with_name("comments.py")), "read-genre", str(path)], capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+                    data = json.loads(result.stdout)
+                    # The container fixture uses ID3v2.3, which joins values with '/'.
+                    expected = (["Breaks", "ID3: House/Deep House"] if extension == ".wav" else ["House", "Deep House"] if extension == ".mp3" else ["House/Deep House"]) if present else []
+                    self.assertEqual(data["genres"], expected)
+                    self.assertEqual(bool(data["warning"]), extension == ".wav" and present)
+                    self.assertEqual(path.read_bytes(), before)
 
     def test_each_format_comments_genre_undo_and_verbatim_preservation(self):
         for extension in [".mp3", ".wav", ".aif", ".aiff"]:
