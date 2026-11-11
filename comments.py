@@ -515,6 +515,9 @@ if __name__ == "__main__":
         action, path = sys.argv[1:3]
         if action == "read":
             print(json.dumps({"comment": read_comment(path)}))
+        elif action == "read-genre":
+            genres, warning = genre_values(path)
+            print(json.dumps({"genres": genres, "warning": warning}))
         elif action == "write":
             write_comment(path, sys.stdin.read())
             print(json.dumps({"ok": True}))
