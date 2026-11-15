@@ -136,9 +136,11 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         table.addTableColumn(column)
         let genreColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("genre"))
         genreColumn.title = "Genre"
-        genreColumn.width = 180
+        genreColumn.width = 170
         genreColumn.minWidth = 80
         table.addTableColumn(genreColumn)
+        // Resizing the window grows the file column; Genre keeps its width (still draggable).
+        table.columnAutoresizingStyle = .firstColumnOnlyAutoresizingStyle
         table.delegate = self
         table.dataSource = self
         table.rowHeight = 25
