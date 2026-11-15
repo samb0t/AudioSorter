@@ -51,6 +51,51 @@ assert(sorter.genreLabel.toolTip == nil)
             result = subprocess.run(["swift", str(script)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_genre_column_loads_lazily_and_caches(self):
+        source = Path(__file__).with_name("main.swift").read_text().split("let app = NSApplication.shared", 1)[0]
+        source = source.replace("final class Sorter:", "class Sorter:")
+        harness = r'''
+class TestSorter: Sorter {
+    var reads: [String] = []
+    override func helper(_ action: String, file: URL, text: String? = nil) throws -> [String: Any] {
+        reads.append(file.lastPathComponent)
+        if file.lastPathComponent == "bad.mp3" { throw NSError(domain: "test", code: 1) }
+        if file.lastPathComponent == "none.mp3" { return ["genres": [""]] }
+        return ["genres": ["House", "Deep House"]]
+    }
+}
+func text(_ view: NSView?) -> String { (view as? NSTextField)?.stringValue ?? "" }
+func settle() {
+    sorter.genreQueue.sync {}
+    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.2))
+}
+let app = NSApplication.shared
+let sorter = TestSorter()
+let names = ["ok.mp3", "none.mp3", "bad.mp3"]
+sorter.files = names.map { URL(fileURLWithPath: "/unused/" + $0) }
+let genre = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("genre"))
+let track = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("track"))
+assert(text(sorter.tableView(sorter.table, viewFor: track, row: 0)) == "ok.mp3")
+assert(sorter.reads.isEmpty)
+for row in 0..<3 { assert(text(sorter.tableView(sorter.table, viewFor: genre, row: row)) == "…") }
+settle()
+assert(sorter.genreCache[sorter.files[0]] == "House | Deep House")
+assert(sorter.genreCache[sorter.files[1]] == "—")
+assert(sorter.genreCache[sorter.files[2]] == "unavailable")
+assert(text(sorter.tableView(sorter.table, viewFor: genre, row: 0)) == "House | Deep House")
+assert(sorter.reads.count == 3)
+sorter.invalidateGenres()
+assert(sorter.genreCache.isEmpty)
+assert(text(sorter.tableView(sorter.table, viewFor: genre, row: 0)) == "…")
+settle()
+assert(sorter.reads.count == 4 && sorter.genreCache[sorter.files[0]] == "House | Deep House")
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            script = Path(directory) / "main.swift"
+            script.write_text(source + harness)
+            result = subprocess.run(["swift", str(script)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_targeted_recheck_failure_retains_rows_without_full_scan(self):
         source = Path(__file__).with_name("main.swift").read_text().split("let app = NSApplication.shared", 1)[0]
         source = source.replace("final class Sorter:", "class Sorter:")
@@ -311,13 +356,19 @@ import AVFoundation
 enum State { case on, off }
 class Toggle { var state = State.off }
 class Field { var string = ""; var stringValue = ""; var isEditable = false; var isHidden = false; var toolTip: String? }
-class Table { func reloadData() {} }
+class Table {
+    func reloadData() {}
+    func reloadData(forRowIndexes: IndexSet, columnIndexes: IndexSet) {}
+}
 class Defaults {
     static let standard = Defaults()
     func set(_ value: Any, forKey: String) {}
 }
 class Configuration { var startAtThirtyPercent = true }
 class Sorter {
+    var genreCache: [URL: String] = [:]
+    func genreText(_ data: [String: Any]) -> String { "" }
+    func invalidateGenres() { genreCache.removeAll() }
     let recursive = Toggle()
     let configuration = Configuration()
     let table = Table()
