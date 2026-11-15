@@ -80,6 +80,11 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
     // Main-thread gate: existing sorting/comment/undo operations are synchronous.
     // Set before launching the worker, release only after every helper has exited.
     var repairingGenres = false
+    // Genre column values, read lazily for visible rows. Bumping the generation drops in-flight reads.
+    var genreCache: [URL: String] = [:]
+    var genreGeneration = 0
+    var genrePending = Set<URL>()
+    let genreQueue = DispatchQueue(label: "AudioSorter.genre", qos: .utility)
     let destinationButtons = NSStackView()
     let destinationHelp = NSTextField(labelWithString: "")
     let revealButton = NSButton(title: "Show in Finder  ⌘⇧R", target: nil, action: nil)
@@ -127,7 +132,13 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         root.addArrangedSubview(folderRow)
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("track"))
         column.title = "Audio (MP3, WAV, AIFF) — J / K or ↓ / ↑ select, Enter plays"
+        column.minWidth = 200
         table.addTableColumn(column)
+        let genreColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("genre"))
+        genreColumn.title = "Genre"
+        genreColumn.width = 180
+        genreColumn.minWidth = 80
+        table.addTableColumn(genreColumn)
         table.delegate = self
         table.dataSource = self
         table.rowHeight = 25
@@ -420,6 +431,7 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
             UserDefaults.standard.set(url.path, forKey: "source")
             folderLabel.stringValue = url.path
             files = found
+            invalidateGenres()
             index = retainedIndex ?? -1
             loading = true
             table.reloadData()
@@ -437,9 +449,46 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
     func numberOfRows(in tableView: NSTableView) -> Int { files.count }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        if tableColumn?.identifier.rawValue == "genre" {
+            let url = files[row]
+            let field = NSTextField(labelWithString: genreCache[url] ?? "…")
+            field.textColor = .secondaryLabelColor
+            field.lineBreakMode = .byTruncatingTail
+            field.toolTip = genreCache[url]
+            if genreCache[url] == nil { loadGenre(url) }
+            return field
+        }
         let field = NSTextField(labelWithString: files[row].lastPathComponent)
         field.lineBreakMode = .byTruncatingMiddle
         return field
+    }
+
+    func genreText(_ data: [String: Any]) -> String {
+        let genres = (data["genres"] as? [String] ?? []).filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        return genres.isEmpty ? "—" : genres.joined(separator: " | ")
+    }
+
+    func loadGenre(_ url: URL) {
+        guard !genrePending.contains(url) else { return }
+        genrePending.insert(url)
+        let generation = genreGeneration
+        genreQueue.async { [self] in
+            let text = (try? helper("read-genre", file: url)).map(genreText) ?? "unavailable"
+            DispatchQueue.main.async { [self] in
+                guard generation == genreGeneration else { return }
+                genrePending.remove(url)
+                genreCache[url] = text
+                if let row = files.firstIndex(of: url) {
+                    table.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integer: 1))
+                }
+            }
+        }
+    }
+
+    func invalidateGenres() {
+        genreGeneration += 1
+        genreCache.removeAll()
+        genrePending.removeAll()
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
@@ -486,6 +535,8 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
             guard !genres.isEmpty else { return }
             genreLabel.stringValue = "Genre: " + genres.joined(separator: " | ")
             genreLabel.toolTip = data["warning"] as? String ?? genreLabel.stringValue
+            genreCache[files[index]] = genreText(data)
+            table.reloadData(forRowIndexes: IndexSet(integer: index), columnIndexes: IndexSet(integer: 1))
         } catch {
             // A genre read failure must not prevent playback or comment editing.
             genreLabel.stringValue = "Genre: unavailable"
@@ -699,6 +750,7 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         do {
             _ = try moveTaggedFile(from: last.to, to: last.from, change: last.genreRestore)
             undoMoves.removeLast()
+            invalidateGenres()
             // Only add it to this queue if it belongs to the current source scope.
             if let source, last.from.deletingLastPathComponent() == source || (recursive.state == .on && last.from.path.hasPrefix(source.path + "/")) {
                 let current = files.indices.contains(index) ? files[index] : nil
