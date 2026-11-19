@@ -1,5 +1,6 @@
 import Cocoa
 import AVFoundation
+import Accelerate
 
 struct Destination: Codable {
     var directory: String
@@ -70,7 +71,11 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
     let folderLabel = NSTextField(labelWithString: "")
     let status = NSTextField(labelWithString: "No files are moved until you press a destination key.")
     let time = NSTextField(labelWithString: "0:00 / 0:00")
-    let slider = NSSlider(value: 0, minValue: 0, maxValue: 1, target: nil, action: nil)
+    let waveform = WaveformView()
+    // Waveform levels per file. Cancelling the job stops an in-flight decode when the selection moves on.
+    var waveformCache: [URL: [Float]] = [:]
+    var waveformJob: CancellationFlag?
+    let waveformQueue = DispatchQueue(label: "AudioSorter.waveform", qos: .userInitiated)
     let comment = NSTextView()
     let recursive = NSButton(checkboxWithTitle: "Include subfolders", target: nil, action: nil)
     var source: URL?
@@ -166,9 +171,10 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         genreLabel.lineBreakMode = .byTruncatingTail
         genreLabel.isHidden = true
         root.addArrangedSubview(genreLabel)
-        slider.target = self
-        slider.action = #selector(seek)
-        let transport = NSStackView(views: [button("Play / pause  ↵", #selector(playPause)), slider, time])
+        waveform.onSeek = { [weak self] fraction in self?.seek(to: fraction) }
+        waveform.onStep = { [weak self] seconds in self?.scrub(seconds) }
+        waveform.setContentHuggingPriority(.defaultLow - 1, for: .horizontal)
+        let transport = NSStackView(views: [button("Play / pause  ↵", #selector(playPause)), waveform, time])
         transport.spacing = 12
         root.addArrangedSubview(transport)
         root.addArrangedSubview(NSTextField(labelWithString: "H / L or ← / →  scrub 5s    •    Shift  30s    •    J / K  down/up    •    N  next    •    E  comment"))
@@ -522,6 +528,7 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
             if configuration.startAtThirtyPercent, let player { player.currentTime = player.duration * 0.3 }
             if autoplay { player?.play() }
         } catch { report(error) }
+        loadWaveform(files[index])
         highlight()
         updateTime()
     }
@@ -611,15 +618,40 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         updateTime()
     }
 
-    @objc func seek() { player?.currentTime = slider.doubleValue; updateTime() }
+    // Positions are fractions of the player's duration, so the playhead stays aligned even if
+    // AVAudioFile and AVAudioPlayer disagree slightly on a VBR file's length.
+    func seek(to fraction: Double) {
+        guard let player else { return }
+        player.currentTime = min(max(0, fraction), 1) * player.duration
+        updateTime()
+    }
 
     func updateTime() {
         let duration = player?.duration ?? 0
         let current = player?.currentTime ?? 0
-        slider.maxValue = max(1, duration)
-        slider.doubleValue = current
+        waveform.progress = duration > 0 ? current / duration : 0
         func stamp(_ value: Double) -> String { String(format: "%d:%02d", Int(value) / 60, Int(value) % 60) }
         time.stringValue = "\(stamp(current)) / \(stamp(duration))"
+        waveform.positionDescription = time.stringValue
+    }
+
+    func loadWaveform(_ url: URL?) {
+        waveformJob?.cancel()
+        waveformJob = nil
+        waveform.levels = url.flatMap { waveformCache[$0] } ?? []
+        guard let url, waveformCache[url] == nil else { return }
+        let job = CancellationFlag()
+        waveformJob = job
+        waveformQueue.async { [weak self] in
+            // Unreadable audio simply leaves the plain playback line; playback errors are reported elsewhere.
+            guard let levels = waveformLevels(url, cancelled: { job.isCancelled }) else { return }
+            DispatchQueue.main.async {
+                guard let self, !job.isCancelled else { return }
+                if self.waveformCache.count >= 200 { self.waveformCache.removeAll() }
+                self.waveformCache[url] = levels
+                self.waveform.levels = levels
+            }
+        }
     }
 
     func next() {
@@ -777,6 +809,7 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         originalComment = ""
         comment.string = ""
         title.stringValue = "End of list"
+        loadWaveform(nil)
         highlight()
         updateTime()
     }
@@ -790,6 +823,99 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
     func windowShouldClose(_ sender: NSWindow) -> Bool { saveComment() }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply { saveComment() ? .terminateNow : .terminateCancel }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+}
+
+final class CancellationFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+    var isCancelled: Bool { lock.withLock { cancelled } }
+    func cancel() { lock.withLock { cancelled = true } }
+}
+
+// Loudness (RMS) per bin, normalized to the loudest bin. Peaks of modern masters sit near
+// full scale throughout, so RMS is what makes breakdowns show up as dips.
+func waveformLevels(_ url: URL, bins: Int = 1200, cancelled: () -> Bool = { false }) -> [Float]? {
+    guard bins > 0, let file = try? AVAudioFile(forReading: url), file.length > 0,
+          let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: 65_536) else { return nil }
+    let channels = Int(file.processingFormat.channelCount)
+    let length = file.length
+    var sums = [Double](repeating: 0, count: bins)
+    var counts = [Int](repeating: 0, count: bins)
+    var position: Int64 = 0
+    while !cancelled() {
+        do { try file.read(into: buffer) } catch { if position == 0 { return nil }; break }
+        let frames = Int(buffer.frameLength)
+        guard frames > 0, let data = buffer.floatChannelData else { break }
+        var offset = 0
+        while offset < frames {
+            let frame = position + Int64(offset)
+            let bin = min(bins - 1, Int(frame * Int64(bins) / length))
+            // A file can decode a few frames past its reported length; those land in the last bin.
+            let binEnd = bin == bins - 1 ? Int64.max : (Int64(bin + 1) * length + Int64(bins) - 1) / Int64(bins)
+            let count = Int(min(Int64(frames - offset), binEnd - frame))
+            for channel in 0..<channels {
+                var squares: Float = 0
+                vDSP_svesq(data[channel] + offset, 1, &squares, vDSP_Length(count))
+                sums[bin] += Double(squares)
+            }
+            counts[bin] += count * channels
+            offset += count
+        }
+        position += Int64(frames)
+    }
+    if cancelled() { return nil }
+    let levels = zip(sums, counts).map { $1 > 0 ? Float(($0 / Double($1)).squareRoot()) : 0 }
+    let loudest = levels.max() ?? 0
+    return loudest > 0 ? levels.map { $0 / loudest } : levels
+}
+
+// SoundCloud-style scrubber: played bars take the accent color; click or drag to seek.
+final class WaveformView: NSView, NSAccessibilitySlider {
+    var levels: [Float] = [] { didSet { needsDisplay = true } }
+    var progress: Double = 0 { didSet { if progress != oldValue { needsDisplay = true } } }
+    var positionDescription = ""
+    var onSeek: ((Double) -> Void)?
+    var onStep: ((Double) -> Void)?
+
+    override var intrinsicContentSize: NSSize { NSSize(width: NSView.noIntrinsicMetric, height: 56) }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func mouseDown(with event: NSEvent) { seek(event) }
+    override func mouseDragged(with event: NSEvent) { seek(event) }
+
+    func fraction(at x: CGFloat) -> Double {
+        bounds.width > 0 ? Double(min(max(0, x / bounds.width), 1)) : 0
+    }
+
+    func seek(_ event: NSEvent) { onSeek?(fraction(at: convert(event.locationInWindow, from: nil).x)) }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let middle = bounds.midY
+        let playhead = bounds.width * CGFloat(progress)
+        if levels.isEmpty {
+            NSColor.secondaryLabelColor.setFill()
+            NSRect(x: 0, y: middle - 0.5, width: bounds.width, height: 1).fill()
+        } else {
+            let step: CGFloat = 3, bar: CGFloat = 2
+            let columns = max(1, Int(bounds.width / step))
+            for column in 0..<columns {
+                let start = column * levels.count / columns
+                let end = min(levels.count, max(start + 1, (column + 1) * levels.count / columns))
+                let height = max(1, CGFloat(levels[start..<end].max() ?? 0) * (bounds.height - 2))
+                let x = CGFloat(column) * step
+                (x + bar / 2 <= playhead ? NSColor.controlAccentColor : NSColor.secondaryLabelColor).setFill()
+                NSRect(x: x, y: middle - height / 2, width: bar, height: height).fill()
+            }
+        }
+        NSColor.labelColor.setFill()
+        NSRect(x: min(playhead, bounds.width - 1), y: 0, width: 1, height: bounds.height).fill()
+    }
+
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .slider }
+    override func accessibilityLabel() -> String? { "Playback position" }
+    override func accessibilityValue() -> Any? { positionDescription }
+    override func accessibilityPerformIncrement() -> Bool { onStep?(5); return onStep != nil }
+    override func accessibilityPerformDecrement() -> Bool { onStep?(-5); return onStep != nil }
 }
 
 final class LintController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate {

@@ -96,6 +96,78 @@ assert(sorter.reads.count == 4 && sorter.genreCache[sorter.files[0]] == "House |
             result = subprocess.run(["swift", str(script)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_waveform_levels_loading_and_seek(self):
+        import math
+        import struct
+        import wave
+        source = Path(__file__).with_name("main.swift").read_text().split("let app = NSApplication.shared", 1)[0]
+        source = source.replace("final class Sorter:", "class Sorter:")
+        harness = r'''
+let app = NSApplication.shared
+let root = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
+let track = root.appendingPathComponent("breakdown.wav")
+// Loud, quiet breakdown, loud: the middle third must read as a clear dip.
+let levels = waveformLevels(track, bins: 30)!
+assert(levels.count == 30 && levels.max()! == 1)
+for bin in [0, 9, 20, 29] { assert(levels[bin] > 0.9, "\(bin): \(levels[bin])") }
+for bin in 11...18 { assert(levels[bin] < 0.15, "\(bin): \(levels[bin])") }
+assert(waveformLevels(track, cancelled: { true }) == nil)
+let bogus = root.appendingPathComponent("bogus.wav")
+try Data("not audio".utf8).write(to: bogus)
+assert(waveformLevels(bogus) == nil)
+func settle(_ sorter: Sorter) {
+    sorter.waveformQueue.sync {}
+    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+}
+let sorter = Sorter()
+sorter.loadWaveform(track)
+settle(sorter)
+assert(sorter.waveform.levels.count == 1200 && sorter.waveformCache[track] == sorter.waveform.levels)
+// Moving on before the decode lands discards it; nothing stale is shown or cached.
+sorter.waveformCache.removeAll()
+sorter.loadWaveform(track)
+sorter.loadWaveform(nil)
+settle(sorter)
+assert(sorter.waveform.levels.isEmpty && sorter.waveformCache.isEmpty)
+sorter.loadWaveform(track)
+settle(sorter)
+sorter.waveform.frame = NSRect(x: 0, y: 0, width: 300, height: 56)
+assert(sorter.waveform.fraction(at: 150) == 0.5)
+assert(sorter.waveform.fraction(at: -20) == 0 && sorter.waveform.fraction(at: 400) == 1)
+sorter.player = try AVAudioPlayer(contentsOf: track)
+sorter.seek(to: sorter.waveform.fraction(at: 150))
+assert(abs(sorter.player!.currentTime - sorter.player!.duration / 2) < 0.01)
+assert(abs(sorter.waveform.progress - 0.5) < 0.01)
+assert(sorter.waveform.positionDescription == sorter.time.stringValue)
+sorter.seek(to: 2)
+assert(abs(sorter.waveform.progress - 1) < 0.01)
+sorter.clear()
+assert(sorter.waveform.levels.isEmpty && sorter.waveform.progress == 0)
+// Drawing exercises both the empty line and the bars.
+for current in [[], levels] {
+    sorter.waveform.levels = current
+    let image = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 300, pixelsHigh: 56, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+    sorter.waveform.cacheDisplay(in: sorter.waveform.bounds, to: image)
+}
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rate = 8000
+            with wave.open(str(root / "breakdown.wav"), "wb") as output:
+                output.setnchannels(2)
+                output.setsampwidth(2)
+                output.setframerate(rate)
+                frames = bytearray()
+                for i in range(rate * 3):
+                    amplitude = 0.05 if rate <= i < rate * 2 else 0.9
+                    sample = int(32767 * amplitude * math.sin(2 * math.pi * 220 * i / rate))
+                    frames += struct.pack("<hh", sample, sample)
+                output.writeframes(bytes(frames))
+            script = root / "main.swift"
+            script.write_text(source + harness)
+            result = subprocess.run(["swift", str(script), directory], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_targeted_recheck_failure_retains_rows_without_full_scan(self):
         source = Path(__file__).with_name("main.swift").read_text().split("let app = NSApplication.shared", 1)[0]
         source = source.replace("final class Sorter:", "class Sorter:")
@@ -387,6 +459,8 @@ class Sorter {
     func report(_ error: Error) { errors += 1 }
     func highlight() {}
     func updateTime() {}
+    var waveforms: [URL?] = []
+    func loadWaveform(_ url: URL?) { waveforms.append(url) }
     func clear() { index = -1; player = nil }
     LOAD
     SELECT
@@ -402,6 +476,7 @@ for i in sorter.files.indices {
     assert(!sorter.player!.isPlaying)
     assert(abs(sorter.player!.currentTime - sorter.player!.duration * 0.3) < 0.01)
     assert(sorter.comment.string == "fixture")
+    assert(sorter.waveforms.last! == sorter.files[i])
 }
 let current = sorter.files[sorter.index]
 let player = sorter.player
