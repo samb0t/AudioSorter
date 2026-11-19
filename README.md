@@ -84,6 +84,9 @@ to move directly from the editor, or leave it with ⌘Enter and use plain number
 In the sorting window, ⌘H scrubs backward instead of hiding the app, regardless of
 focus. The ⌘H/L and ⌘J/K shortcuts work both inside and outside the comment editor.
 Scrubbing keeps the current focus and leaves unsaved text unchanged.
+The waveform shows loudness (RMS) across the track, so breakdowns appear as dips;
+click or drag on it to seek. It is computed locally in the background, read-only,
+and kept in memory for the session.
 Clicking a destination also saves edits.
 Use **Show in Finder** in the toolbar or File menu to reveal the current audio file, or
 right-click a list item to reveal that file without changing tracks. This does not
