@@ -174,6 +174,11 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         waveform.onSeek = { [weak self] fraction in self?.seek(to: fraction) }
         waveform.onStep = { [weak self] seconds in self?.scrub(seconds) }
         waveform.setContentHuggingPriority(.defaultLow - 1, for: .horizontal)
+        // Monospaced digits plus room for "00:00 / 00:00" keep the waveform from shifting as time ticks.
+        time.font = .monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+        time.alignment = .right
+        let widestTime = ("00:00 / 00:00" as NSString).size(withAttributes: [.font: time.font!]).width
+        time.widthAnchor.constraint(greaterThanOrEqualToConstant: ceil(widestTime) + 6).isActive = true
         let transport = NSStackView(views: [button("Play / pause  ↵", #selector(playPause)), waveform, time])
         transport.spacing = 12
         root.addArrangedSubview(transport)
