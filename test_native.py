@@ -988,12 +988,19 @@ try session.edit(duplicate: false, duration: duration)
 assert(session.pieces == [Piece(from: .start, to: .bar(2)), Piece(from: .bar(5), to: .end)])
 assert(abs(session.outputDuration(duration) - 15) < 1e-9)
 assert(session.selection == 2 && session.undo.count == 1)
+// Unsaved until written; a save marks exactly these pieces as saved.
+assert(session.unsaved && !EditSession(grid: session.grid).unsaved)
+session.savedPieces = session.pieces
+assert(!session.unsaved)
 // Duplicate bars 2–3 of the edited track; the copy follows and becomes the selection.
 session.selection = 1
 session.bars = 2
 try session.edit(duplicate: true, duration: duration)
 assert(session.pieces == [Piece(from: .start, to: .bar(2)), Piece(from: .bar(5), to: .bar(6)), Piece(from: .bar(1), to: .bar(2)), Piece(from: .bar(5), to: .end)])
 assert(session.selection == 3 && abs(session.outputDuration(duration) - 19) < 1e-9)
+assert(session.unsaved)
+let duplicated = session.pieces
+session.savedPieces = duplicated
 // Frames at 1 kHz: where each part of the edited track comes from.
 let timeline = EditTimeline(session: session, rate: 1000, frames: 21_000)
 assert(timeline.length == 19_000)
@@ -1013,6 +1020,8 @@ assert(session.pieces == before && session.undo.count == 2)
 session.regrid(BeatGrid(bpm: 120, anchor: 2.5))
 assert(session.pieces == [Piece(from: .start, to: .bar(1)), Piece(from: .bar(4), to: .bar(5)), Piece(from: .bar(0), to: .bar(1)), Piece(from: .bar(4), to: .end)])
 assert(EditTimeline(session: session, rate: 1000, frames: 21_000).segments == timeline.segments)
+// Renumbering is not an edit: the saved state follows the grid.
+assert(!session.unsaved && session.savedPieces == session.pieces)
 assert(session.undo[0] == [Piece(from: .start, to: .end)] && session.undo[1] == [Piece(from: .start, to: .bar(1)), Piece(from: .bar(4), to: .end)])
 // Cutting from the very first downbeat starts the edit on a bar line.
 var intro = EditSession(grid: BeatGrid(bpm: 120, anchor: 0))
@@ -1048,6 +1057,9 @@ class TestSorter: Sorter {
     var refreshed = 0
     var sabotage = false
     var trashed: [URL] = []
+    var answer = false
+    var asked: [[String]] = []
+    override func askToDiscard(_ unsaved: [URL]) -> Bool { asked.append(unsaved.map(\.lastPathComponent)); return answer }
     override func helper(_ action: String, file: URL, text: String? = nil) throws -> [String: Any] {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: CommandLine.arguments[2])
@@ -1179,7 +1191,23 @@ assert(editor.status.stringValue.contains("failed verification"), editor.status.
 assert(sorter.trashed == [edit] && !FileManager.default.fileExists(atPath: edit.path))
 let unchanged = try Data(contentsOf: root.appendingPathComponent("loop.wav"))
 assert(unchanged == original && sorter.refreshed == 3)
+// Unsaved edits: marked in the editor and confirmed before quitting.
+assert(!editor.session.unsaved && editor.window?.isDocumentEdited == false && sorter.unsavedEdits().isEmpty)
+assert(sorter.applicationShouldTerminate(app) == .terminateNow && sorter.asked.isEmpty)
+editor.playhead = 0.1
+editor.setSelectionStart()
+editor.session.bars = 1
+editor.duplicateSelection()
+assert(editor.session.unsaved && editor.window?.isDocumentEdited == true && editor.editLabel.stringValue.hasSuffix("unsaved"))
+// Closing the editor keeps the edit, still unsaved.
 editor.window?.close()
+assert(sorter.unsavedEdits().map(\.lastPathComponent) == ["loop.wav"])
+assert(sorter.applicationShouldTerminate(app) == .terminateCancel && sorter.asked == [["loop.wav"]])
+assert(!sorter.windowShouldClose(NSWindow()) && sorter.asked.count == 2)
+sorter.answer = true
+assert(sorter.windowShouldClose(NSWindow()) && sorter.asked.count == 3)
+// Closing the last window then quits without asking again.
+assert(sorter.applicationShouldTerminate(app) == .terminateNow && sorter.asked.count == 3)
 '''
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -869,8 +869,39 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         alert.runModal()
     }
 
-    func windowShouldClose(_ sender: NSWindow) -> Bool { saveComment() }
-    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply { saveComment() ? .terminateNow : .terminateCancel }
+    // Tracks whose bar edits changed since they were last saved, including the open editor's.
+    func unsavedEdits() -> [URL] {
+        editorController?.storeSession()
+        return editSessions.filter { $0.value.unsaved }.map(\.key).sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+    }
+
+    // Closing the main window quits the app, so both paths ask; once confirmed, never twice.
+    var discardConfirmed = false
+    func confirmDiscardingEdits() -> Bool {
+        guard !discardConfirmed else { return true }
+        let unsaved = unsavedEdits()
+        guard unsaved.isEmpty || askToDiscard(unsaved) else { return false }
+        discardConfirmed = !unsaved.isEmpty
+        return true
+    }
+
+    func askToDiscard(_ unsaved: [URL]) -> Bool {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = unsaved.count == 1 ? "Quit without saving your bar edit?" : "Quit without saving \(unsaved.count) bar edits?"
+        alert.informativeText = unsaved.map(\.lastPathComponent).joined(separator: "\n")
+            + "\n\nUnsaved edits only last while the app is open. To keep one, cancel, select the track, press B, then ⌘S."
+        alert.addButton(withTitle: "Cancel").keyEquivalent = "\r"
+        let quit = alert.addButton(withTitle: "Quit Anyway")
+        quit.keyEquivalent = ""
+        quit.hasDestructiveAction = true
+        return alert.runModal() == .alertSecondButtonReturn
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool { saveComment() && confirmDiscardingEdits() }
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        saveComment() && confirmDiscardingEdits() ? .terminateNow : .terminateCancel
+    }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 }
 
@@ -1494,7 +1525,11 @@ struct EditSession {
     var downbeatSet = false
     var undo: [[Piece]] = []
     var redo: [[Piece]] = []
+    // The pieces last written to disk; nil until the first save.
+    var savedPieces: [Piece]?
     var edited: Bool { pieces != Self.untouched }
+    // Grid-only changes do not count: they never change what a save would lose.
+    var unsaved: Bool { edited && pieces != savedPieces }
 
     func time(_ bound: Bound, duration: Double) -> Double {
         switch bound {
@@ -1577,6 +1612,7 @@ struct EditSession {
         pieces = remapAll(pieces)
         undo = undo.map(remapAll)
         redo = redo.map(remapAll)
+        savedPieces = savedPieces.map(remapAll)
         grid = updated
     }
 }
@@ -2291,8 +2327,9 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         }
         let junctions = timeline.junctions.count
         editLabel.stringValue = session.edited
-            ? "\(stamp(duration)) → \(stamp(timeline.duration)) • \(junctions) splice\(junctions == 1 ? "" : "s")"
+            ? "\(stamp(duration)) → \(stamp(timeline.duration)) • \(junctions) splice\(junctions == 1 ? "" : "s")\(session.unsaved ? " • unsaved" : "")"
             : "Unedited"
+        window?.isDocumentEdited = session.unsaved
         saveButton.isEnabled = session.edited && !saving
         undoButton.isEnabled = !session.undo.isEmpty
         redoButton.isEnabled = !session.redo.isEmpty
@@ -2596,6 +2633,7 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         let timeline = timeline
         let request: [String: Any] = ["segments": timeline.segments, "fade": Int((rate * 0.005).rounded()), "output": output.path]
         let mp3 = url.pathExtension.lowercased() == "mp3"
+        let pieces = session.pieces
         saving = true
         refresh()
         status.stringValue = mp3 ? "Saving… decoding and re-encoding the MP3." : "Saving…"
@@ -2626,6 +2664,7 @@ final class EditorController: NSWindowController, NSWindowDelegate {
                 refresh()
                 switch result {
                 case .success(let report):
+                    if self.url == url { session.savedPieces = pieces } else { sorter.editSessions[url]?.savedPieces = pieces }
                     let dropped = report["dropped"] as? [String] ?? []
                     let note = dropped.isEmpty ? "" : " Removed timeline-specific metadata that no longer lines up: \(dropped.joined(separator: ", "))."
                     status.stringValue = "Saved \(output.lastPathComponent) (\(stamp(timeline.duration))). The original is unchanged.\(note)"

@@ -223,7 +223,11 @@ can put the playhead on the first kick.
 | ⌘S | Save edit |
 | Esc | Stop (or leave the BPM/bars field without applying) |
 
-Grid, edits, and undo history are remembered per track until the app quits. Edits
+Grid, edits, and undo history are remembered per track until the app quits, so
+closing the editor never loses anything. Unsaved edits show as "• unsaved" in the
+editor and as the dot in its close button. Quitting (or closing the main window)
+with unsaved edits lists the affected tracks and asks first, with Cancel as the
+default. Grid-only changes (BPM, downbeat) don't count as unsaved. Edits
 are stored as bar numbers, so tweaking the BPM or downbeat afterwards keeps them on
 the same bars. Only 4/4 at a constant tempo is supported.
 
