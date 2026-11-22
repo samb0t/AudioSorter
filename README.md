@@ -254,6 +254,13 @@ fades.
   where they appeared. (FFmpeg's own decoder can disagree by ~500 samples on MP3s
   without a gapless header.) The ID3 tag, including artwork and DJ frames, is copied
   over unchanged. The output has a LAME gapless header, so its length is exact.
+- **BPM tag.** Saved edits get the grid's BPM in their ID3 `TBPM` frame (for example
+  `124` or `123.5`), added to existing tags or as a new tag. **Write BPM to tag**
+  writes it to the original, using the same lossless writer as comments and Genre
+  (audio and other tags unchanged). It is enabled only when the value would change.
+  WAV BPM goes in an ID3 chunk, because RIFF INFO has no BPM field, and Rekordbox
+  may ignore it (as it does WAV ID3 Genre). Rekordbox reads beat grids only from its
+  own analysis, not from tags.
 - **Safety checks.** The original is only ever read. The edit is written to a hidden
   temporary file in the same folder, flushed to disk, parsed again, and only then
   linked into place under its final name. A crash or full disk therefore never leaves
@@ -352,6 +359,10 @@ verification was performed for this feature; disposable-copy checks remain requi
 - [ ] Automatic BPM and downbeat detection (beat_this) to pre-fill the grid.
 - [x] Metronome click over editor playback to check the grid by ear; tap tempo.
 - [ ] Persist grids and edits across launches.
+- [ ] Rekordbox XML export so the grid (BPM + downbeat) and, later, cues set here
+  import into Rekordbox, leaving Rekordbox for playlist building only. Needs a
+  one-file test on the installed Rekordbox version: XML import support, whether
+  re-analysis overwrites imported grids, and MP3 grid offsets (encoder delay).
 
 ## Tests
 

@@ -1122,6 +1122,8 @@ try FileManager.default.removeItem(at: decoded)
 
 let editor = EditorController(sorter: sorter)
 sorter.editorController = editor
+func taggedBPM(_ url: URL) -> Double? { (try! sorter.helper("read-bpm", file: url))["bpm"] as? Double }
+func frames(_ url: URL) -> Int64 { try! AVAudioFile(forReading: url).length }
 func settle(_ condition: () -> Bool) {
     let deadline = Date().addingTimeInterval(60)
     while !condition() && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
@@ -1180,6 +1182,9 @@ for (name, bpm) in [("loop.wav", 120.0), ("loop.mp3", 120.0), ("loop.aiff", 120.
     assert(sorter.status.stringValue.hasPrefix("Saved and selected"))
     let saved = try AVAudioFile(forReading: output)
     assert(saved.length == 264_600, "\(name): \(saved.length)")
+    // The edit carries the grid's BPM; the original's tag is untouched.
+    assert(taggedBPM(output) == 120)
+    assert(taggedBPM(url) == (name == "loop.wav" ? nil : 120))
     // The repeated bar is loud audio, not the cut quiet bar.
     let edited = waveformPeaks(output)!
     assert(edited.extremes(from: 180_000, to: 260_000)!.1 > 0.8)
@@ -1224,11 +1229,25 @@ assert(sorter.windowShouldClose(NSWindow()) && sorter.asked.count == 3)
 assert(sorter.applicationShouldTerminate(app) == .terminateNow && sorter.asked.count == 3)
 // Tapping sets the tempo; the metronome follows the edited track's grid.
 editor.open(root.appendingPathComponent("loop.wav"))
+assert(editor.status.stringValue.hasSuffix("Restored this track's grid and edits."))
+// The waveform finishing must not overwrite a newer message.
+editor.status.stringValue = "newer"
+settle { editor.waveform.peaks != nil }
+RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+assert(editor.status.stringValue == "newer")
 for (i, time) in [100.0, 100.6, 101.2, 101.8].enumerated() {
     editor.tap(at: time)
     assert(editor.status.stringValue.hasPrefix(i < 3 ? "Tap along" : "Tapped 100 BPM"), editor.status.stringValue)
 }
 assert(editor.session.grid.bpm == 100 && editor.bpmField.stringValue == "100")
+// Writing the BPM to the original is explicit, and only offered when it would change the tag.
+let wavURL = root.appendingPathComponent("loop.wav")
+assert(editor.taggedBPM == nil && editor.writeBPMButton.isEnabled)
+let wavAudio = frames(wavURL)
+editor.writeBPM()
+assert(taggedBPM(wavURL) == 100 && editor.taggedBPM == 100)
+assert(!editor.writeBPMButton.isEnabled && editor.status.stringValue.hasPrefix("Wrote BPM 100"))
+assert(frames(wavURL) == wavAudio)
 assert(editor.format(124.3) == "124.3" && editor.format(123.25) == "123.25" && editor.format(124) == "124")
 editor.clickButton.state = .on
 editor.clickChanged()

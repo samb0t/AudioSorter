@@ -15,7 +15,7 @@ import struct
 import subprocess
 import tempfile
 
-from mutagen.id3 import ID3
+from mutagen.id3 import ID3, TBPM
 from mutagen.mp3 import MP3, BitrateMode
 
 from comments import AudioMetadata, TagBlock, chunk, synchsafe, unsupported
@@ -172,7 +172,22 @@ def splice_pcm(layout, pcm, segments, fade):
     return bytes(output)
 
 
-def splice_container(metadata, segments, fade):
+def bpm_text(bpm):
+    """124 or 123.5: the grid's tempo, without trailing zeros."""
+    if not isinstance(bpm, (int, float)) or not 40 <= bpm <= 300:
+        raise ValueError("BPM must be between 40 and 300")
+    return f"{bpm:.2f}".rstrip("0").rstrip(".")
+
+
+def with_bpm(block, bpm):
+    """A copy of the tag with TBPM set; other frames stay byte-identical."""
+    updated = TagBlock()
+    updated.version, updated.frames, updated.padding = block.version, list(block.frames), block.padding
+    updated.replace(b"TBPM", updated.encode(TBPM(encoding=0, text=[bpm_text(bpm)])))
+    return updated
+
+
+def splice_container(metadata, segments, fade, bpm=None):
     """Return (new file bytes, dropped metadata names, new frame count) for WAV/AIFF."""
     layout = Layout(metadata)
     check_segments(layout.frames, segments, fade)
@@ -193,9 +208,13 @@ def splice_container(metadata, segments, fade):
         elif key.lower() == b"id3 ":
             filtered, names = without_positional_frames(TagBlock(payload))
             dropped += names
-            if names:
+            if bpm is not None:
+                filtered = with_bpm(filtered, bpm)
+            if names or bpm is not None:
                 raw = chunk(key, filtered.bytes(), metadata.endian)
         body.append(raw)
+    if bpm is not None and metadata.id3_index is None:
+        body.append(chunk(b"id3 " if metadata.wav else b"ID3 ", with_bpm(TagBlock(), bpm).bytes(), metadata.endian))
     data = metadata.original[8:12] + b"".join(body)
     return metadata.original[:4] + len(data).to_bytes(4, metadata.endian) + data, dropped, remaining
 
@@ -216,7 +235,7 @@ def mp3_quality(source):
     return ["-b:a", f"{kbps}k"]
 
 
-def splice_mp3(metadata, decoded, segments, fade, work):
+def splice_mp3(metadata, decoded, segments, fade, work, bpm=None):
     """Splice the AVFoundation decode, re-encode once, then reattach the original tag."""
     spliced, _, _ = splice_container(AudioMetadata(decoded), segments, fade)
     cut = Path(work) / "cut.wav"
@@ -231,8 +250,10 @@ def splice_mp3(metadata, decoded, segments, fade, work):
     if not audio or audio.startswith(b"ID3"):
         raise RuntimeError("FFmpeg produced unexpected MP3 output")
     block, dropped = without_positional_frames(metadata.block)
+    if bpm is not None:
+        block = with_bpm(block, bpm)
     trailer = metadata.audio[-128:] if len(metadata.audio) >= 128 and metadata.audio[-128:-125] == b"TAG" else b""
-    return (block.bytes() if metadata.id3_present else b"") + audio + trailer, dropped
+    return (block.bytes() if metadata.id3_present or bpm is not None else b"") + audio + trailer, dropped
 
 
 def write_new(output, data, source):
@@ -254,20 +275,20 @@ def write_new(output, data, source):
 def cut_file(source, request):
     source = Path(source)
     output = Path(request["output"])
-    segments, fade = request["segments"], request.get("fade", 0)
+    segments, fade, bpm = request["segments"], request.get("fade", 0), request.get("bpm")
     if output.parent != source.parent or output.suffix.lower() != source.suffix.lower() or output.name == source.name:
         raise ValueError("The edit must be a new file beside the original with the same extension")
     if os.path.lexists(output):
         raise FileExistsError(f"{output.name} already exists; it was not replaced")
     metadata = AudioMetadata(source)
     if metadata.container:
-        data, dropped, remaining = splice_container(metadata, segments, fade)
+        data, dropped, remaining = splice_container(metadata, segments, fade, bpm)
     else:
         decoded = request.get("decoded")
         if not decoded:
             raise ValueError("MP3 edits need the decoded audio")
         with tempfile.TemporaryDirectory(prefix="audio-sorter-") as work:
-            data, dropped = splice_mp3(metadata, decoded, segments, fade, work)
+            data, dropped = splice_mp3(metadata, decoded, segments, fade, work, bpm)
         remaining = None
     write_new(output, data, source)
     if metadata.container and Layout(AudioMetadata(output)).frames != remaining:
@@ -286,3 +307,13 @@ def read_bpm(path):
         if 40 <= bpm <= 300:
             return bpm
     return None
+
+
+def write_bpm(path, bpm):
+    """Set TBPM on an existing file in place, with the same lossless, verified writer as comments.
+
+    WAV files get an ID3 chunk if they have none; RIFF INFO has no BPM field.
+    """
+    metadata = AudioMetadata(path)
+    metadata.block = with_bpm(metadata.block, bpm)
+    metadata.save(edit_id3=True)

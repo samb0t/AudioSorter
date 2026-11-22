@@ -13,7 +13,7 @@ import unittest
 from mutagen.id3 import APIC, GEOB, ID3, PRIV, TBPM, TIT2, TLEN
 
 from comments import AudioMetadata, chunk
-from edit import Layout, cut_file, read_bpm
+from edit import Layout, bpm_text, cut_file, read_bpm, write_bpm
 
 FADE = 8
 
@@ -229,6 +229,59 @@ class EditTests(unittest.TestCase):
                 source.write_bytes(b"FORM" + len(body).to_bytes(4, "big") + body)
                 self.assertEqual(read_bpm(source), expected)
 
+    def test_edits_carry_the_grid_bpm(self):
+        self.assertEqual([bpm_text(v) for v in (124, 124.0, 123.5, 123.25, 99.999)], ["124", "124", "123.5", "123.25", "100"])
+        for bad in (39, 301, "124", None):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                bpm_text(bad)
+        # A WAV without any ID3 gets a new chunk holding only TBPM; the original is untouched.
+        source = self.root / "plain.wav"
+        wav(source)
+        original = digest(source)
+        _, output = self.cut(source, [[0, 100], [200, 400]], bpm=123.5)
+        self.assertEqual(read_bpm(output), 123.5)
+        self.assertEqual([key for key, _, _ in AudioMetadata(output).parts], [b"fmt ", b"data", b"id3 "])
+        self.assertIsNone(read_bpm(source))
+        self.assertEqual(digest(source), original)
+        # An existing tag keeps its other frames and has its BPM replaced.
+        tags = ID3()
+        tags.add(TIT2(encoding=3, text=["Title"]))
+        tags.add(TBPM(encoding=3, text=["120"]))
+        tagged = self.root / "tagged.wav"
+        wav(tagged, tags=tags)
+        _, output = self.cut(tagged, [[0, 100], [200, 400]], bpm=124)
+        kept = AudioMetadata(output).block.tags()
+        self.assertEqual((kept["TBPM"].text, kept["TIT2"].text), (["124"], ["Title"]))
+        self.assertEqual(AudioMetadata(output).block.version, 4)
+
+    def test_write_bpm_in_place_changes_only_the_tag(self):
+        for name in ("plain.wav", "plain.aiff"):
+            with self.subTest(name=name):
+                path = self.root / name
+                (wav if name.endswith(".wav") else aiff)(path, extra=[(b"NAME", b"Kept")])
+                before = Layout(AudioMetadata(path)).pcm()
+                write_bpm(path, 126.5)
+                self.assertEqual(read_bpm(path), 126.5)
+                metadata = AudioMetadata(path)
+                self.assertEqual(Layout(metadata).pcm(), before)
+                self.assertIn(b"NAME", [key for key, _, _ in metadata.parts])
+                write_bpm(path, 127)
+                self.assertEqual(metadata.block.tags().get("TBPM").text, ["126.5"])
+                self.assertEqual(AudioMetadata(path).block.tags()["TBPM"].text, ["127"])
+                unchanged = digest(path)
+                with self.assertRaises(ValueError):
+                    write_bpm(path, 500)
+                self.assertEqual(digest(path), unchanged)
+
+    def test_write_bpm_cli(self):
+        path = self.root / "plain.aiff"
+        aiff(path)
+        script = str(Path(__file__).with_name("comments.py"))
+        result = subprocess.run([sys.executable, script, "write-bpm", str(path)], input='{"bpm": 124}', capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        read = subprocess.run([sys.executable, script, "read-bpm", str(path)], capture_output=True, text=True)
+        self.assertEqual(json.loads(read.stdout), {"bpm": 124.0})
+
     @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg unavailable")
     def test_mp3_is_reencoded_from_the_decoded_audio_with_tags_carried_over(self):
         source = self.root / "track.mp3"
@@ -244,12 +297,13 @@ class EditTests(unittest.TestCase):
         subprocess.run(["ffmpeg", "-v", "error", "-i", str(source), "-map", "0:a", "-c:a", "pcm_f32le", str(decoded)], capture_output=True, check=True)
         frames = Layout(AudioMetadata(decoded)).frames
         original = digest(source)
-        result, output = self.cut(source, [[0, 22050], [44100, frames], [frames - 22050, frames]], decoded=str(decoded))
+        result, output = self.cut(source, [[0, 22050], [44100, frames], [frames - 22050, frames]], decoded=str(decoded), bpm=124)
         self.assertEqual(result["dropped"], ["TLEN"])
         self.assertEqual(digest(source), original)
         metadata = AudioMetadata(output)
         self.assertEqual(metadata.block.version, 3)
-        self.assertEqual(sorted(metadata.block.tags().keys()), ["APIC:cover", "TIT2"])
+        self.assertEqual(sorted(metadata.block.tags().keys()), ["APIC:cover", "TBPM", "TIT2"])
+        self.assertEqual(read_bpm(output), 124)
         probe = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=bit_rate", "-of", "json", str(output)],
                                capture_output=True, text=True, check=True)
         self.assertEqual(json.loads(probe.stdout)["streams"][0]["bit_rate"], "192000")
@@ -258,6 +312,16 @@ class EditTests(unittest.TestCase):
         self.assertEqual(len(pcm) // 8, 22050 + (frames - 44100) + 22050)
         with self.assertRaises(ValueError):
             self.cut(source, [[0, 100]], name="other.mp3")
+        # An untagged MP3 gains a tag holding just the BPM.
+        bare = self.root / "bare.mp3"
+        subprocess.run(["ffmpeg", "-v", "error", "-i", str(source), "-map", "0:a", "-c:a", "copy", "-map_metadata", "-1",
+                        "-id3v2_version", "0", "-write_id3v1", "0", str(bare)], capture_output=True, check=True)
+        self.assertFalse(bare.read_bytes().startswith(b"ID3"))
+        _, output = self.cut(bare, [[0, 22050], [44100, frames]], decoded=str(decoded), bpm=123.5)
+        self.assertEqual(sorted(AudioMetadata(output).block.tags().keys()), ["TBPM"])
+        self.assertEqual(read_bpm(output), 123.5)
+        write_bpm(bare, 126)
+        self.assertEqual(read_bpm(bare), 126)
 
 
 if __name__ == "__main__":

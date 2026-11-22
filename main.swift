@@ -2211,6 +2211,9 @@ final class EditorController: NSWindowController, NSWindowDelegate {
     let duplicateButton = NSButton(title: "Duplicate  ⌘D", target: nil, action: nil)
     let snapButton = NSButton(checkboxWithTitle: "Snap (⌘-click: free)", target: nil, action: nil)
     let clickButton = NSButton(checkboxWithTitle: "Click  M", target: nil, action: nil)
+    let writeBPMButton = NSButton(title: "Write BPM to tag", target: nil, action: nil)
+    // The original file's BPM tag, so writing it is only offered when it would change.
+    var taggedBPM: Double?
     let metronome = Metronome()
     var tapTempo = TapTempo()
 
@@ -2261,10 +2264,12 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         bpmField.action = #selector(bpmEntered)
         bpmField.widthAnchor.constraint(equalToConstant: 80).isActive = true
         let gridRow = NSStackView(views: [
-            NSTextField(labelWithString: "BPM"), bpmField, button("Tap  T", #selector(tapPressed)), button("÷2", #selector(halveTempo)), button("×2", #selector(doubleTempo)),
+            NSTextField(labelWithString: "BPM"), bpmField, button("Tap  T", #selector(tapPressed)), button("÷2", #selector(halveTempo)), button("×2", #selector(doubleTempo)), writeBPMButton,
             button("Downbeat at playhead  D", #selector(setDownbeat)),
             button("◀ 1 ms  ,", #selector(nudgeEarlier)), button("1 ms ▶  .", #selector(nudgeLater)), snapButton
         ])
+        writeBPMButton.target = self
+        writeBPMButton.action = #selector(writeBPM)
         snapButton.state = UserDefaults.standard.object(forKey: "editorSnap") as? Bool ?? true ? .on : .off
         snapButton.target = self
         snapButton.action = #selector(snapChanged)
@@ -2333,9 +2338,13 @@ final class EditorController: NSWindowController, NSWindowDelegate {
             return
         }
         self.url = url
-        if let remembered = sorter.editSessions[url] { session = remembered }
+        let tagged = (try? sorter.helper("read-bpm", file: url))?["bpm"] as? Double
+        taggedBPM = tagged
+        if let remembered = sorter.editSessions[url] {
+            session = remembered
+            status.stringValue = remembered.edited ? "Restored this track's grid and edits." : "Restored this track's grid."
+        }
         else {
-            let tagged = (try? sorter.helper("read-bpm", file: url))?["bpm"] as? Double
             session = EditSession(grid: BeatGrid(bpm: tagged ?? 120, anchor: 0))
             status.stringValue = tagged.map { "BPM \(format($0)) from the file's tag. Set a downbeat (D) and check the grid late in the track." }
                 ?? "No BPM tag. Enter the BPM, then set a downbeat (D)."
@@ -2363,12 +2372,15 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         let job = CancellationFlag()
         peaksJob = job
         let previous = status.stringValue
-        status.stringValue = "Reading waveform… " + previous
+        let loading = "Reading waveform… " + previous
+        status.stringValue = loading
         peaksQueue.async { [weak self] in
             let peaks = waveformPeaks(url, cancelled: { job.isCancelled })
             DispatchQueue.main.async {
                 guard let self, !job.isCancelled, self.url == url else { return }
-                self.status.stringValue = peaks == nil ? "Cannot draw this file's waveform." : previous
+                // Only replace our own message; anything newer stays.
+                if peaks == nil { self.status.stringValue = "Cannot draw this file's waveform." }
+                else if self.status.stringValue == loading { self.status.stringValue = previous }
                 self.waveform.peaks = peaks
                 self.refreshOverview()
             }
@@ -2419,6 +2431,8 @@ final class EditorController: NSWindowController, NSWindowDelegate {
             : "Unedited"
         window?.isDocumentEdited = session.unsaved
         saveButton.isEnabled = session.edited && !saving
+        writeBPMButton.isEnabled = taggedBPM != tagBPM && !saving
+        writeBPMButton.toolTip = "Write \(format(tagBPM)) to the original's BPM tag (currently \(taggedBPM.map(format) ?? "none")). Saved edits get it automatically."
         undoButton.isEnabled = !session.undo.isEmpty
         redoButton.isEnabled = !session.redo.isEmpty
         cutButton.isEnabled = session.selection != nil
@@ -2635,6 +2649,25 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         window?.makeFirstResponder(waveform)
     }
 
+    // The grid's tempo as written to tags: two decimals at most.
+    var tagBPM: Double { (session.grid.bpm * 100).rounded() / 100 }
+
+    // Changes only the original's BPM tag, with the same lossless writer as comments and Genre.
+    @objc func writeBPM() {
+        guard let url, !saving else { return }
+        guard !sorter.repairingGenres else { status.stringValue = "Genre repair is running; tag writes are unavailable until it finishes."; return }
+        let bpm = tagBPM
+        do {
+            let json = String(decoding: try JSONSerialization.data(withJSONObject: ["bpm": bpm]), as: UTF8.self)
+            _ = try sorter.helper("write-bpm", file: url, text: json)
+            taggedBPM = bpm
+            status.stringValue = "Wrote BPM \(format(bpm)) to \(url.lastPathComponent). Its audio and other tags are unchanged."
+        } catch {
+            status.stringValue = "BPM not written: \(error.localizedDescription)"
+        }
+        refresh()
+    }
+
     @objc func halveTempo() { changeGrid(BeatGrid(bpm: session.grid.bpm / 2, anchor: session.grid.anchor)) }
     @objc func doubleTempo() { changeGrid(BeatGrid(bpm: session.grid.bpm * 2, anchor: session.grid.anchor)) }
 
@@ -2744,7 +2777,8 @@ final class EditorController: NSWindowController, NSWindowDelegate {
             return
         }
         let timeline = timeline
-        let request: [String: Any] = ["segments": timeline.segments, "fade": Int((rate * 0.005).rounded()), "output": output.path]
+        let bpm = tagBPM
+        let request: [String: Any] = ["segments": timeline.segments, "fade": Int((rate * 0.005).rounded()), "output": output.path, "bpm": bpm]
         let mp3 = url.pathExtension.lowercased() == "mp3"
         let pieces = session.pieces
         saving = true
@@ -2780,7 +2814,7 @@ final class EditorController: NSWindowController, NSWindowDelegate {
                     if self.url == url { session.savedPieces = pieces } else { sorter.editSessions[url]?.savedPieces = pieces }
                     let dropped = report["dropped"] as? [String] ?? []
                     let note = dropped.isEmpty ? "" : " Removed timeline-specific metadata that no longer lines up: \(dropped.joined(separator: ", "))."
-                    status.stringValue = "Saved \(output.lastPathComponent) (\(stamp(timeline.duration))). The original is unchanged.\(note)"
+                    status.stringValue = "Saved \(output.lastPathComponent) (\(stamp(timeline.duration)), BPM \(format(bpm)) tagged). The original is unchanged.\(note)"
                     sorter.editSaved(output)
                 case .failure(let error):
                     status.stringValue = "Not saved: \(error.localizedDescription)"
