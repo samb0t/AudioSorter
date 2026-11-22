@@ -345,10 +345,21 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         return url.deletingLastPathComponent().appendingPathComponent(name).appendingPathExtension(url.pathExtension)
     }
 
+    // Back to sorting: the editor closes (its session is kept) and the new edit is selected,
+    // ready for a destination key. The original stays in the list just above or below it.
     func editSaved(_ output: URL) {
-        // Picks up the new file when it lands in the listed folder; the current track stays put.
+        editorController?.close()
+        window?.makeKeyAndOrderFront(nil)
         if source != nil { refreshFolder() }
-        status.stringValue = "Saved edit \(output.lastPathComponent). The original is unchanged."
+        // Folder listings can spell a path through a symlink differently (/var vs /private/var).
+        let target = output.resolvingSymlinksInPath().path
+        if let row = files.firstIndex(where: { $0.resolvingSymlinksInPath().path == target }) {
+            select(row, autoplay: false)
+            window?.makeFirstResponder(table)
+            status.stringValue = "Saved and selected \(output.lastPathComponent). Press 1–\(names.count) to move it; the original is unchanged and still listed."
+        } else {
+            status.stringValue = "Saved \(output.lastPathComponent) beside the original; it is outside the listed folder. The original is unchanged."
+        }
     }
 
     @objc func checkDestinationTags() {
@@ -1479,6 +1490,8 @@ struct EditSession {
     var pieces = untouched
     var selection: Int?  // First selected bar of the edited track.
     var bars = 16
+    // Clicks snap only once the grid has been placed; until then it is a guess.
+    var downbeatSet = false
     var undo: [[Piece]] = []
     var redo: [[Piece]] = []
     var edited: Bool { pieces != Self.untouched }
@@ -1743,6 +1756,7 @@ final class EditWaveformView: NSView {
     var visibleStart = 0.0
     var secondsPerPixel = 0.01
     var fitted = true
+    var snapping = false
     var onSeek: ((Double) -> Void)?
     var onGridDrag: ((Double?) -> Void)?
     var onViewChange: (() -> Void)?
@@ -1820,17 +1834,38 @@ final class EditWaveformView: NSView {
         zoom(by: 1 + Double(event.magnification), around: convert(event.locationInWindow, from: nil).x)
     }
 
+    // The finest grid division at least 12 px wide: sixteenths when zoomed in, then
+    // eighths, beats, half bars, bars, 2 bars and so on as the view zooms out.
+    func snapUnit(_ grid: BeatGrid) -> Double {
+        var unit = grid.beatDuration / 4
+        while unit / secondsPerPixel < 12 { unit *= 2 }
+        return unit
+    }
+
+    func snapped(_ time: Double, to grid: BeatGrid) -> Double {
+        let unit = snapUnit(grid)
+        // Measured from bar 1 so multi-bar units land on musically even bars.
+        let origin = grid.barTime(grid.firstBar)
+        return min(max(0, origin + ((time - origin) / unit).rounded() * unit), duration)
+    }
+
+    func seek(_ event: NSEvent) {
+        let time = min(max(0, time(at: convert(event.locationInWindow, from: nil).x)), duration)
+        if snapping, !event.modifierFlags.contains(.command), let grid = timeline?.grid { onSeek?(snapped(time, to: grid)) }
+        else { onSeek?(time) }
+    }
+
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         let x = convert(event.locationInWindow, from: nil).x
         if event.modifierFlags.contains(.option) { dragOrigin = x; onGridDrag?(0) }
-        else { onSeek?(min(max(0, time(at: x)), duration)) }
+        else { seek(event) }
     }
 
     override func mouseDragged(with event: NSEvent) {
         let x = convert(event.locationInWindow, from: nil).x
         if let dragOrigin { onGridDrag?(Double(x - dragOrigin) * secondsPerPixel) }
-        else { onSeek?(min(max(0, time(at: x)), duration)) }
+        else { seek(event) }
     }
 
     override func mouseUp(with event: NSEvent) {
@@ -1936,6 +1971,17 @@ final class EditWaveformView: NSView {
     private func drawGrid(_ grid: BeatGrid, height: CGFloat) {
         let barPixels = grid.barDuration / secondsPerPixel
         let end = visibleStart + span
+        // Eighths or sixteenths, when zoomed in far enough to snap to them.
+        let unit = snapUnit(grid)
+        if unit < grid.beatDuration {
+            NSColor.tertiaryLabelColor.withAlphaComponent(0.15).setFill()
+            let perBeat = Int((grid.beatDuration / unit).rounded())
+            let first = Int(((visibleStart - grid.anchor) / unit).rounded(.down))
+            let last = Int(((end - grid.anchor) / unit).rounded(.up))
+            for line in first...max(first, last) where line % perBeat != 0 {
+                NSRect(x: x(for: grid.anchor + Double(line) * unit), y: 0, width: 1, height: height).fill()
+            }
+        }
         if barPixels / 4 >= 6 {
             NSColor.tertiaryLabelColor.withAlphaComponent(0.35).setFill()
             let firstBeat = Int(((visibleStart - grid.anchor) / grid.beatDuration).rounded(.down))
@@ -1944,8 +1990,9 @@ final class EditWaveformView: NSView {
                 NSRect(x: x(for: grid.anchor + Double(beat) * grid.beatDuration), y: 0, width: 1, height: height).fill()
             }
         }
+        // Same 12 px threshold as snapping, so every bar line drawn is one a click can land on.
         var step = 1
-        while Double(step) * barPixels < 6 { step *= 2 }
+        while Double(step) * barPixels < 12 { step *= 2 }
         var labelStep = step
         while Double(labelStep) * barPixels < 44 { labelStep *= 2 }
         let attributes: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular), .foregroundColor: NSColor.secondaryLabelColor]
@@ -2055,6 +2102,7 @@ final class EditorController: NSWindowController, NSWindowDelegate {
     let redoButton = NSButton(title: "Redo  ⌘⇧Z", target: nil, action: nil)
     let cutButton = NSButton(title: "Cut  X", target: nil, action: nil)
     let duplicateButton = NSButton(title: "Duplicate  ⌘D", target: nil, action: nil)
+    let snapButton = NSButton(checkboxWithTitle: "Snap to grid (⌘-click places freely)", target: nil, action: nil)
 
     init(sorter: Sorter) {
         self.sorter = sorter
@@ -2097,8 +2145,11 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         let gridRow = NSStackView(views: [
             NSTextField(labelWithString: "BPM"), bpmField, button("÷2", #selector(halveTempo)), button("×2", #selector(doubleTempo)),
             button("Downbeat at playhead  D", #selector(setDownbeat)),
-            button("◀ 1 ms  ,", #selector(nudgeEarlier)), button("1 ms ▶  .", #selector(nudgeLater))
+            button("◀ 1 ms  ,", #selector(nudgeEarlier)), button("1 ms ▶  .", #selector(nudgeLater)), snapButton
         ])
+        snapButton.state = UserDefaults.standard.object(forKey: "editorSnap") as? Bool ?? true ? .on : .off
+        snapButton.target = self
+        snapButton.action = #selector(snapChanged)
         gridRow.spacing = 8
         content.addArrangedSubview(gridRow)
         barsField.target = self
@@ -2222,6 +2273,8 @@ final class EditorController: NSWindowController, NSWindowDelegate {
     func refresh() {
         let timeline = timeline
         waveform.timeline = timeline
+        waveform.snapping = snapButton.state == .on && session.downbeatSet
+        snapButton.toolTip = session.downbeatSet ? "Clicks snap to the finest grid lines shown; zoom in for beats and sixteenths." : "Snapping starts once you set a downbeat (D)."
         playhead = min(playhead, timeline.duration)
         waveform.playhead = playhead
         if bpmField.currentEditor() == nil { bpmField.stringValue = format(session.grid.bpm) }
@@ -2405,11 +2458,19 @@ final class EditorController: NSWindowController, NSWindowDelegate {
 
     // MARK: Grid
 
+    @objc func snapChanged() {
+        UserDefaults.standard.set(snapButton.state == .on, forKey: "editorSnap")
+        refresh()
+        window?.makeFirstResponder(waveform)
+    }
+
     // Grid changes keep edits on the same bar numbers, which then sit on the adjusted lines.
-    func changeGrid(_ grid: BeatGrid, remap: Bool = false) {
+    // Placing the grid (rather than only changing tempo) turns on snapping.
+    func changeGrid(_ grid: BeatGrid, remap: Bool = false, placed: Bool = false) {
         guard grid.bpm.isFinite, (40...300).contains(grid.bpm), grid.anchor.isFinite else { return }
         if playing { stopAndKeepPosition() }
         if remap { session.regrid(grid) } else { session.grid = grid }
+        if placed { session.downbeatSet = true }
         refresh()
     }
 
@@ -2437,21 +2498,21 @@ final class EditorController: NSWindowController, NSWindowDelegate {
     @objc func setDownbeat() {
         guard let source = sourceTime(playhead) else { return }
         let selectionTime = session.selection.map { timeline.grid.barTime($0) }
-        changeGrid(BeatGrid(bpm: session.grid.bpm, anchor: source), remap: true)
+        changeGrid(BeatGrid(bpm: session.grid.bpm, anchor: source), remap: true, placed: true)
         // Keep the selection on whichever bar line is now nearest to where it was.
         if let selectionTime { session.selection = timeline.grid.nearestBar(to: selectionTime) }
         refresh()
         status.stringValue = "Downbeat set at \(stamp(playhead)). Check that later bar lines still sit on the kicks; adjust BPM if they drift."
     }
 
-    func nudge(_ seconds: Double) { changeGrid(BeatGrid(bpm: session.grid.bpm, anchor: session.grid.anchor + seconds)) }
+    func nudge(_ seconds: Double) { changeGrid(BeatGrid(bpm: session.grid.bpm, anchor: session.grid.anchor + seconds), placed: true) }
     @objc func nudgeEarlier() { nudge(-0.001) }
     @objc func nudgeLater() { nudge(0.001) }
 
     func dragGrid(_ offset: Double?) {
         guard let offset else { dragAnchor = nil; return }
         if dragAnchor == nil { dragAnchor = session.grid.anchor }
-        changeGrid(BeatGrid(bpm: session.grid.bpm, anchor: dragAnchor! + offset))
+        changeGrid(BeatGrid(bpm: session.grid.bpm, anchor: dragAnchor! + offset), placed: true)
     }
 
     // MARK: Selection and edits
@@ -2550,7 +2611,15 @@ final class EditorController: NSWindowController, NSWindowDelegate {
                     request["decoded"] = decoded.path
                 }
                 let json = String(decoding: try JSONSerialization.data(withJSONObject: request), as: UTF8.self)
-                return try sorter.helper("cut", file: url, text: json)
+                let report = try sorter.helper("cut", file: url, text: json)
+                // Read the new file back the way a player would: it must decode to exactly the edited length.
+                let length = (try? AVAudioFile(forReading: output))?.length
+                guard length == timeline.length else {
+                    try? sorter.sendToTrash(output)
+                    let found = length.map { "\($0) frames instead of \(timeline.length)" } ?? "could not be read"
+                    throw EditError("The saved file failed verification (\(found)), so it was moved to Trash. The original is unchanged.")
+                }
+                return report
             }
             DispatchQueue.main.async { [self] in
                 saving = false

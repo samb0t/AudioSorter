@@ -192,12 +192,22 @@ an editor for removing or repeating whole bars, the way you would in Ableton:
    right across the new splice.
 5. **Save** (**⌘S**) writes `<name> - <editSuffix>.<ext>` next to the original. The
    original is never modified and an existing edit is never overwritten (move it to
-   Trash first). The list refreshes to show the new file.
+   Trash first). The editor then closes and the new edit is selected in the main
+   list, so 1–9 sorts it right away. The original stays listed, usually just above
+   it alphabetically (other versions of the same title can sort in between), so you
+   can sort or trash it too. Reopening the original (B) restores its grid and edits.
+
+**Snapping.** Once the grid is placed (D, a nudge, or ⌥-drag), clicks snap to the
+finest grid division at least 12 px wide: sixteenths and eighths when zoomed in, then
+beats, half bars, bars, and multiples of bars as you zoom out. The grid draws exactly
+those lines. ⌘-click places the playhead freely; the **Snap to grid** checkbox turns
+snapping off (remembered). Before a downbeat is set, clicks are always free so you
+can put the playhead on the first kick.
 
 | Key (editor) | Action |
 | --- | --- |
 | Space | Play/pause |
-| Click | Place the playhead |
+| Click | Place the playhead (snaps once the grid is placed; ⌘-click is free) |
 | ← / → | Previous/next beat; Shift: bar |
 | Scroll / swipe | Move along the track |
 | Pinch, ⌘/⌥-scroll, = / − | Zoom (down to individual samples); 0 fits the track |
@@ -232,6 +242,14 @@ fades.
   where they appeared. (FFmpeg's own decoder can disagree by ~500 samples on MP3s
   without a gapless header.) The ID3 tag, including artwork and DJ frames, is copied
   over unchanged. The output has a LAME gapless header, so its length is exact.
+- **Safety checks.** The original is only ever read. The edit is written to a hidden
+  temporary file in the same folder, flushed to disk, parsed again, and only then
+  linked into place under its final name. A crash or full disk therefore never leaves
+  a half-written `- SamEdit` file, and the link step fails rather than replacing an
+  existing file. Container layouts the parser is not certain about are refused rather
+  than guessed. Finally the app reads the finished file back with macOS's decoder: if
+  its length is not exactly the edited length, it is moved to Trash and the save
+  is reported as failed.
 - **Timeline metadata is dropped**, because it would point at the wrong places:
   WAV `cue `/`smpl`/`acid`/`plst`/`LIST adtl`, AIFF `MARK`/`INST`, ID3 `TLEN`,
   `MLLT`/`ETCO`/`SYTC`/`SYLT`/`ASPI`/`POSS`, Serato `GEOB` frames, and Traktor

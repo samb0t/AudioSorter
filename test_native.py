@@ -1046,6 +1046,8 @@ assert(merge.pieces == EditSession.untouched && !merge.edited)
 // The real Python helper, run from the repository rather than the app bundle.
 class TestSorter: Sorter {
     var refreshed = 0
+    var sabotage = false
+    var trashed: [URL] = []
     override func helper(_ action: String, file: URL, text: String? = nil) throws -> [String: Any] {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: CommandLine.arguments[2])
@@ -1060,9 +1062,13 @@ class TestSorter: Sorter {
         process.waitUntilExit()
         let result = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
         if process.terminationStatus != 0 { throw NSError(domain: "test", code: 1, userInfo: [NSLocalizedDescriptionKey: result["error"] as? String ?? "helper failed"]) }
+        // Simulates a file damaged after writing; verification must catch it.
+        if sabotage, action == "cut", let path = result["output"] as? String { try Data("not audio".utf8).write(to: URL(fileURLWithPath: path)) }
         return result
     }
-    override func refreshFolder() { refreshed += 1 }
+    override func refreshFolder() { refreshed += 1; super.refreshFolder() }
+    // Never touches the real Trash.
+    override func sendToTrash(_ url: URL) throws { trashed.append(url); try FileManager.default.removeItem(at: url) }
     override func report(_ error: Error) { fatalError("Unexpected error: \(error)") }
 }
 let app = NSApplication.shared
@@ -1089,6 +1095,7 @@ assert(copy.length == reference.length && copy.processingFormat.sampleRate == re
 try FileManager.default.removeItem(at: decoded)
 
 let editor = EditorController(sorter: sorter)
+sorter.editorController = editor
 func settle(_ condition: () -> Bool) {
     let deadline = Date().addingTimeInterval(60)
     while !condition() && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
@@ -1100,6 +1107,22 @@ for (name, bpm) in [("loop.wav", 120.0), ("loop.mp3", 120.0), ("loop.aiff", 120.
     assert(editor.session.grid.bpm == bpm && editor.bpmField.stringValue == "120")
     settle { editor.waveform.peaks != nil }
     assert(!editor.saveButton.isEnabled)
+    // Clicks snap only after the grid is placed, to the finest division at least 12 px wide.
+    assert(!editor.waveform.snapping)
+    editor.snapButton.state = .on
+    editor.snapChanged()
+    editor.playhead = 0
+    editor.setDownbeat()
+    assert(editor.waveform.snapping && editor.session.downbeatSet)
+    let grid = editor.timeline.grid
+    editor.waveform.secondsPerPixel = 0.001
+    assert(editor.waveform.snapUnit(grid) == 0.125 && editor.waveform.snapped(1.3, to: grid) == 1.25)
+    editor.waveform.secondsPerPixel = 0.05
+    assert(editor.waveform.snapUnit(grid) == 1 && editor.waveform.snapped(1.3, to: grid) == 1)
+    editor.snapButton.state = .off
+    editor.snapChanged()
+    assert(!editor.waveform.snapping)
+    editor.waveform.fit()
     // Arrow keys snap to the next grid line: bars are 2 s, beats 0.5 s.
     editor.playhead = 2.1
     editor.step(1, bars: true)
@@ -1126,6 +1149,9 @@ for (name, bpm) in [("loop.wav", 120.0), ("loop.mp3", 120.0), ("loop.aiff", 120.
     settle { !editor.saving }
     let output = root.appendingPathComponent((name as NSString).deletingPathExtension + " - SamEdit." + (name as NSString).pathExtension)
     assert(editor.status.stringValue.hasPrefix("Saved"), editor.status.stringValue)
+    // Back in the main list with the edit selected, ready to sort.
+    assert(editor.window?.isVisible == false && sorter.files[sorter.index].lastPathComponent == output.lastPathComponent)
+    assert(sorter.status.stringValue.hasPrefix("Saved and selected"))
     let saved = try AVAudioFile(forReading: output)
     assert(saved.length == 264_600, "\(name): \(saved.length)")
     // The repeated bar is loud audio, not the cut quiet bar.
@@ -1142,6 +1168,17 @@ editor.window?.close()
 assert(sorter.editSessions.count == 3 && sorter.editSessions[root.appendingPathComponent("loop.wav")]?.edited == true)
 editor.open(root.appendingPathComponent("loop.wav"))
 assert(editor.session.edited && editor.timeline.length == 264_600)
+// A saved file that does not read back at the edited length is moved to Trash.
+let edit = root.appendingPathComponent("loop - SamEdit.wav")
+try FileManager.default.removeItem(at: edit)
+let original = try Data(contentsOf: root.appendingPathComponent("loop.wav"))
+sorter.sabotage = true
+editor.save()
+settle { !editor.saving }
+assert(editor.status.stringValue.contains("failed verification"), editor.status.stringValue)
+assert(sorter.trashed == [edit] && !FileManager.default.fileExists(atPath: edit.path))
+let unchanged = try Data(contentsOf: root.appendingPathComponent("loop.wav"))
+assert(unchanged == original && sorter.refreshed == 3)
 editor.window?.close()
 '''
         with tempfile.TemporaryDirectory() as directory:
