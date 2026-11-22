@@ -1037,6 +1037,20 @@ try merge.edit(duplicate: true, duration: duration)
 merge.selection = 4
 try merge.edit(duplicate: false, duration: duration)
 assert(merge.pieces == EditSession.untouched && !merge.edited)
+// Tap tempo averages from the first tap to the last and restarts after a pause.
+var tapper = TapTempo()
+assert(tapper.tap(at: 10) == nil && tapper.tap(at: 10.5) == nil && tapper.tap(at: 11) == nil)
+assert(tapper.tap(at: 11.5) == 120)
+assert(tapper.tap(at: 12.01) == 119.4)
+assert(tapper.tap(at: 20) == nil && tapper.taps == [20])
+// The metronome clicks for 30 ms on each beat, louder on downbeats, never past the end.
+let clickGrid = BeatGrid(bpm: 120, anchor: 0.25)
+func peak(_ start: Double) -> Float { (0..<2205).map { abs(Metronome.click(at: start + Double($0) / 44_100, grid: clickGrid, end: 10)) }.max()! }
+assert(peak(0.25) > peak(0.75) && peak(0.75) > 0.2 && abs(peak(2.25) - peak(0.25)) < 1e-3)
+assert(peak(0.29) == 0 && peak(0.1) == 0 && peak(10.25) == 0)
+var samples = [Float](repeating: 1, count: 100)
+samples.withUnsafeMutableBufferPointer { Metronome.fill($0.baseAddress!, count: 100, from: 0.25, rate: 44_100, state: Metronome.State(enabled: true, grid: clickGrid, end: 10)) }
+assert(samples == (0..<100).map { Metronome.click(at: 0.25 + Double($0) / 44_100, grid: clickGrid, end: 10) })
 '''
         with tempfile.TemporaryDirectory() as directory:
             script = Path(directory) / "main.swift"
@@ -1208,6 +1222,21 @@ sorter.answer = true
 assert(sorter.windowShouldClose(NSWindow()) && sorter.asked.count == 3)
 // Closing the last window then quits without asking again.
 assert(sorter.applicationShouldTerminate(app) == .terminateNow && sorter.asked.count == 3)
+// Tapping sets the tempo; the metronome follows the edited track's grid.
+editor.open(root.appendingPathComponent("loop.wav"))
+for (i, time) in [100.0, 100.6, 101.2, 101.8].enumerated() {
+    editor.tap(at: time)
+    assert(editor.status.stringValue.hasPrefix(i < 3 ? "Tap along" : "Tapped 100 BPM"), editor.status.stringValue)
+}
+assert(editor.session.grid.bpm == 100 && editor.bpmField.stringValue == "100")
+assert(editor.format(124.3) == "124.3" && editor.format(123.25) == "123.25" && editor.format(124) == "124")
+editor.clickButton.state = .on
+editor.clickChanged()
+assert(editor.metronome.snapshot.enabled && editor.metronome.snapshot.grid == editor.timeline.grid)
+assert(editor.metronome.snapshot.end == editor.timeline.duration && editor.metronome.snapshot.sync == nil)
+editor.clickButton.state = .off
+editor.clickChanged()
+assert(!editor.metronome.snapshot.enabled)
 '''
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

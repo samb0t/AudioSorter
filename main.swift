@@ -1783,6 +1783,77 @@ func decodeToWAV(_ source: URL, to destination: URL) throws {
     output.close()
 }
 
+// A click on every beat of the edited track, accented on downbeats, rendered live by the
+// audio engine so tempo and grid changes are heard immediately without rescheduling.
+final class Metronome: @unchecked Sendable {
+    struct State {
+        var enabled = false
+        var grid = BeatGrid(bpm: 120, anchor: 0)
+        var end = 0.0
+        // Host time at which playback of `seconds` (edited-track time) is heard; nil when stopped.
+        var sync: (host: UInt64, seconds: Double)?
+    }
+
+    static let secondsPerTick: Double = {
+        var info = mach_timebase_info_data_t()
+        mach_timebase_info(&info)
+        return Double(info.numer) / Double(info.denom) / 1e9
+    }()
+    static let length = 0.03
+
+    private let lock = NSLock()
+    private var state = State()
+    func update(_ change: (inout State) -> Void) { lock.withLock { change(&state) } }
+    var snapshot: State { lock.withLock { state } }
+
+    static func click(at time: Double, grid: BeatGrid, end: Double) -> Float {
+        guard time >= 0, time < end else { return 0 }
+        let beat = ((time - grid.anchor) / grid.beatDuration).rounded(.down)
+        let phase = time - (grid.anchor + beat * grid.beatDuration)
+        guard phase < length else { return 0 }
+        let downbeat = Int(beat) % 4 == 0
+        return Float((downbeat ? 0.6 : 0.35) * sin(2 * .pi * (downbeat ? 1500 : 1000) * phase) * exp(-phase * 150))
+    }
+
+    static func fill(_ samples: UnsafeMutablePointer<Float>, count: Int, from start: Double, rate: Double, state: State) {
+        for frame in 0..<count {
+            samples[frame] = click(at: start + Double(frame) / rate, grid: state.grid, end: state.end)
+        }
+    }
+
+    func makeNode(rate: Double) -> AVAudioSourceNode {
+        AVAudioSourceNode(format: AVAudioFormat(standardFormatWithSampleRate: rate, channels: 1)!) { [self] _, timestamp, frameCount, bufferList in
+            let state = snapshot
+            for buffer in UnsafeMutableAudioBufferListPointer(bufferList) {
+                guard let data = buffer.mData?.assumingMemoryBound(to: Float.self) else { continue }
+                let count = Int(frameCount)
+                guard state.enabled, let sync = state.sync, timestamp.pointee.mFlags.contains(.hostTimeValid) else {
+                    data.update(repeating: 0, count: count)
+                    continue
+                }
+                let start = sync.seconds + Double(Int64(bitPattern: timestamp.pointee.mHostTime &- sync.host)) * Self.secondsPerTick
+                Self.fill(data, count: count, from: start, rate: rate, state: state)
+            }
+            return noErr
+        }
+    }
+}
+
+// Tap tempo: the average of the last taps, restarting after a pause.
+struct TapTempo {
+    var taps: [TimeInterval] = []
+    static let needed = 4
+
+    // Returns the tempo once enough taps have arrived, rounded to 0.1 BPM.
+    mutating func tap(at time: TimeInterval) -> Double? {
+        if let last = taps.last, time - last > 2 || time <= last { taps.removeAll() }
+        taps.append(time)
+        taps = Array(taps.suffix(16))
+        guard taps.count >= Self.needed else { return nil }
+        return (600 * Double(taps.count - 1) / (taps.last! - taps.first!)).rounded() / 10
+    }
+}
+
 final class EditWaveformView: NSView {
     var peaks: WaveformPeaks? { didSet { needsDisplay = true } }
     var timeline: EditTimeline? { didSet { rawCache = nil; if fitted { fit() } else { clampView() } } }
@@ -2138,7 +2209,10 @@ final class EditorController: NSWindowController, NSWindowDelegate {
     let redoButton = NSButton(title: "Redo  ⌘⇧Z", target: nil, action: nil)
     let cutButton = NSButton(title: "Cut  X", target: nil, action: nil)
     let duplicateButton = NSButton(title: "Duplicate  ⌘D", target: nil, action: nil)
-    let snapButton = NSButton(checkboxWithTitle: "Snap to grid (⌘-click places freely)", target: nil, action: nil)
+    let snapButton = NSButton(checkboxWithTitle: "Snap (⌘-click: free)", target: nil, action: nil)
+    let clickButton = NSButton(checkboxWithTitle: "Click  M", target: nil, action: nil)
+    let metronome = Metronome()
+    var tapTempo = TapTempo()
 
     init(sorter: Sorter) {
         self.sorter = sorter
@@ -2149,6 +2223,10 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         window.isReleasedWhenClosed = false
         window.delegate = self
         engine.attach(node)
+        let outputRate = engine.mainMixerNode.outputFormat(forBus: 0).sampleRate
+        let click = metronome.makeNode(rate: outputRate > 0 ? outputRate : 44_100)
+        engine.attach(click)
+        engine.connect(click, to: engine.mainMixerNode, format: click.outputFormat(forBus: 0))
         // Views no longer clip by default (macOS 14); lines past the edges would spill out.
         waveform.clipsToBounds = true
         overview.clipsToBounds = true
@@ -2171,7 +2249,11 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         content.addArrangedSubview(waveform)
         waveform.setContentHuggingPriority(.defaultLow - 1, for: .vertical)
         positionLabel.font = .monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
-        let transport = NSStackView(views: [playButton, button("Play into selection  P", #selector(previewSelection)), positionLabel])
+        clickButton.state = UserDefaults.standard.bool(forKey: "editorMetronome") ? .on : .off
+        clickButton.target = self
+        clickButton.action = #selector(clickChanged)
+        clickButton.toolTip = "Metronome on every beat (accented downbeats) to check the grid by ear"
+        let transport = NSStackView(views: [playButton, button("Play into selection  P", #selector(previewSelection)), clickButton, positionLabel])
         transport.spacing = 12
         content.addArrangedSubview(transport)
         bpmField.placeholderString = "BPM"
@@ -2179,7 +2261,7 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         bpmField.action = #selector(bpmEntered)
         bpmField.widthAnchor.constraint(equalToConstant: 80).isActive = true
         let gridRow = NSStackView(views: [
-            NSTextField(labelWithString: "BPM"), bpmField, button("÷2", #selector(halveTempo)), button("×2", #selector(doubleTempo)),
+            NSTextField(labelWithString: "BPM"), bpmField, button("Tap  T", #selector(tapPressed)), button("÷2", #selector(halveTempo)), button("×2", #selector(doubleTempo)),
             button("Downbeat at playhead  D", #selector(setDownbeat)),
             button("◀ 1 ms  ,", #selector(nudgeEarlier)), button("1 ms ▶  .", #selector(nudgeLater)), snapButton
         ])
@@ -2208,7 +2290,7 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         content.addArrangedSubview(editRow)
         status.textColor = .secondaryLabelColor
         content.addArrangedSubview(status)
-        let help = NSTextField(wrappingLabelWithString: "Click to place the playhead • Scroll to move • Pinch, ⌘/⌥-scroll or = / − to zoom, 0 fits • ⌥-drag slides the grid • ← / → beat, ⇧ bar • Shift+, / . nudges 10 ms • Esc stops")
+        let help = NSTextField(wrappingLabelWithString: "Click to place the playhead • Scroll to move • Pinch, ⌘/⌥-scroll or = / − to zoom, 0 fits • ⌥-drag slides the grid • ← / → beat, ⇧ bar • Shift+, / . nudges 10 ms • T taps tempo • M click • Esc stops")
         help.textColor = .tertiaryLabelColor
         help.font = .systemFont(ofSize: 11)
         content.addArrangedSubview(help)
@@ -2297,8 +2379,12 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         if let url { sorter.editSessions[url] = session }
     }
 
+    // Up to two decimals without trailing zeros: 124, 124.5, 123.25.
     func format(_ bpm: Double) -> String {
-        bpm == bpm.rounded() ? String(format: "%.0f", bpm) : String(format: "%.2f", bpm)
+        var text = String(format: "%.2f", bpm)
+        while text.hasSuffix("0") { text.removeLast() }
+        if text.hasSuffix(".") { text.removeLast() }
+        return text
     }
 
     func stamp(_ seconds: Double) -> String {
@@ -2310,6 +2396,8 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         let timeline = timeline
         waveform.timeline = timeline
         waveform.snapping = snapButton.state == .on && session.downbeatSet
+        let clicking = clickButton.state == .on
+        metronome.update { $0.grid = timeline.grid; $0.end = timeline.duration; $0.enabled = clicking }
         snapButton.toolTip = session.downbeatSet ? "Clicks snap to the finest grid lines shown; zoom in for beats and sixteenths." : "Snapping starts once you set a downbeat (D)."
         playhead = min(playhead, timeline.duration)
         waveform.playhead = playhead
@@ -2402,6 +2490,8 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         case "-", "_": waveform.zoom(by: 0.5, around: waveform.x(for: playhead)); return true
         case "0", ")": waveform.fit(); return true
         case "d": setDownbeat(); return true
+        case "t": tapPressed(); return true
+        case "m": clickButton.state = clickButton.state == .on ? .off : .on; clickChanged(); return true
         case "i": setSelectionStart(); return true
         case "o": setSelectionEnd(); return true
         case "p": previewSelection(); return true
@@ -2451,7 +2541,10 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         playStart = start
         playEnd = timeline.length
         playhead = Double(start) / rate
-        node.play()
+        // Start slightly ahead so the click can be lined up with the first sample.
+        let startHost = mach_absolute_time() + AVAudioTime.hostTime(forSeconds: 0.05)
+        node.play(at: AVAudioTime(hostTime: startHost))
+        metronome.update { $0.sync = (startHost, Double(start) / rate) }
         playing = true
         updatePosition()
     }
@@ -2475,6 +2568,7 @@ final class EditorController: NSWindowController, NSWindowDelegate {
 
     func stopPlayback() {
         node.stop()
+        metronome.update { $0.sync = nil }
         playing = false
     }
 
@@ -2505,7 +2599,8 @@ final class EditorController: NSWindowController, NSWindowDelegate {
     // Placing the grid (rather than only changing tempo) turns on snapping.
     func changeGrid(_ grid: BeatGrid, remap: Bool = false, placed: Bool = false) {
         guard grid.bpm.isFinite, (40...300).contains(grid.bpm), grid.anchor.isFinite else { return }
-        if playing { stopAndKeepPosition() }
+        // Unedited playback does not depend on the grid, so tapping and nudging can continue live.
+        if playing && session.edited { stopAndKeepPosition() }
         if remap { session.regrid(grid) } else { session.grid = grid }
         if placed { session.downbeatSet = true }
         refresh()
@@ -2519,6 +2614,24 @@ final class EditorController: NSWindowController, NSWindowDelegate {
             return
         }
         changeGrid(BeatGrid(bpm: bpm, anchor: session.grid.anchor))
+        window?.makeFirstResponder(waveform)
+    }
+
+    @objc func tapPressed() { tap(at: ProcessInfo.processInfo.systemUptime) }
+
+    func tap(at time: TimeInterval) {
+        guard let bpm = tapTempo.tap(at: time) else {
+            status.stringValue = "Tap along on each beat… \(TapTempo.needed - tapTempo.taps.count) more."
+            return
+        }
+        guard (40...300).contains(bpm) else { status.stringValue = "Tapped \(format(bpm)) BPM, outside 40–300. Pause, then tap again."; return }
+        changeGrid(BeatGrid(bpm: bpm, anchor: session.grid.anchor))
+        status.stringValue = "Tapped \(format(bpm)) BPM from \(tapTempo.taps.count) taps. Keep tapping to refine; pause 2 s to start over. Then set the downbeat (D) and fine-tune."
+    }
+
+    @objc func clickChanged() {
+        UserDefaults.standard.set(clickButton.state == .on, forKey: "editorMetronome")
+        refresh()
         window?.makeFirstResponder(waveform)
     }
 

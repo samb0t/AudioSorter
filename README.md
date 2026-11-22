@@ -177,10 +177,16 @@ or import files automatically. Keep gig playlists as curated regular playlists.
 an editor for removing or repeating whole bars, the way you would in Ableton:
 
 1. **Set the grid.** The BPM comes from the file's BPM tag when present (Beatport
-   and most stores set one); otherwise type it. Zoom in on the first kick, click to
+   and most stores set one); otherwise type it, or tap **T** (or **Tap**) along with
+   the beat: after four taps the BPM becomes the running average, to 0.1 BPM, and
+   a 2-second pause starts over. Tapping sets tempo only, not the downbeat. Zoom in on the first kick, click to
    put the playhead on it, and press **D** to make it a downbeat. Then check bar
    lines late in the track. If they drift off the kicks, fine-tune the BPM (decimals
-   are fine). **,** / **.** nudge the grid 1 ms (Shift: 10 ms), and ⌥-drag slides it.
+   are fine). Turn on **Click** (**M**) to hear a metronome on every beat, accented
+   on downbeats, and listen for flamming against the kicks. The click is generated
+   live in sync with playback (measured within 0.1 ms) and follows the edited track
+   across splices. On an unedited track, BPM changes, taps, and nudges are heard
+   immediately while playing; once there are edits, grid changes pause playback. **,** / **.** nudge the grid 1 ms (Shift: 10 ms), and ⌥-drag slides it.
 2. **Select bars.** **I** starts a selection at the bar line nearest the playhead.
    Choose a length (8/16/32 or type one), or press **O** at its end.
 3. **Edit.** **X** (or Delete) cuts the selection; **⌘D** duplicates it right
@@ -213,6 +219,8 @@ can put the playhead on the first kick.
 | Pinch, ⌘/⌥-scroll, = / − | Zoom (down to individual samples); 0 fits the track |
 | Overview strip | Click or drag to jump |
 | D | Downbeat at playhead |
+| T | Tap tempo |
+| M | Metronome click on/off (remembered) |
 | , / . | Nudge grid 1 ms earlier/later; Shift: 10 ms |
 | ⌥-drag | Slide the grid |
 | I / O | Selection start/end at the nearest bar line |
@@ -342,7 +350,7 @@ verification was performed for this feature; disposable-copy checks remain requi
 - [x] Cut Bars editor: manual BPM/downbeat grid, zoom to sample level, cut and
   duplicate whole bars, crossfaded splices, save as a new file.
 - [ ] Automatic BPM and downbeat detection (beat_this) to pre-fill the grid.
-- [ ] Metronome click over editor playback to check the grid by ear; tap tempo.
+- [x] Metronome click over editor playback to check the grid by ear; tap tempo.
 - [ ] Persist grids and edits across launches.
 
 ## Tests
