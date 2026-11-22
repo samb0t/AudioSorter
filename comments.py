@@ -534,6 +534,9 @@ if __name__ == "__main__":
         elif action == "cut":
             from edit import cut_file
             print(json.dumps(cut_file(path, json.load(sys.stdin))))
+        elif action == "rekordbox-xml":
+            from rekordbox import export
+            print(json.dumps(export(path, json.load(sys.stdin)["output"])))
         elif action == "lint":
             print(json.dumps(lint_destinations(path, json.load(sys.stdin)["destinations"])))
         elif action in ("repair-missing-genres", "repair-genres", "recheck-genres"):

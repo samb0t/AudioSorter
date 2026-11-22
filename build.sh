@@ -16,7 +16,7 @@ iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AudioSorter.icns"
 if [ ! -f "$ROOT/config.json" ]; then
   cp "$ROOT/config.example.json" "$ROOT/config.json"
 fi
-cp "$ROOT/comments.py" "$ROOT/edit.py" "$APP/Contents/Resources/"
+cp "$ROOT/comments.py" "$ROOT/edit.py" "$ROOT/rekordbox.py" "$APP/Contents/Resources/"
 printf '%s' "$ROOT/.venv/bin/python" > "$APP/Contents/Resources/python-path"
 printf '%s' "$ROOT/config.json" > "$APP/Contents/Resources/config-path"
 cat > "$APP/Contents/Info.plist" <<'PLIST'
