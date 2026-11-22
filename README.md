@@ -203,6 +203,19 @@ an editor for removing or repeating whole bars, the way you would in Ableton:
    it alphabetically (other versions of the same title can sort in between), so you
    can sort or trash it too. Reopening the original (B) restores its grid and edits.
 
+**Memory cues.** **C** adds a memory cue at the playhead: green markers on the
+waveform and the overview strip, with the count beside the cue buttons. A stopped
+playhead is already where your click or arrow key put it (snapped or ⌘-click free);
+while playing, the cue snaps to the nearest beat when snapping is on. **⇧C** removes
+the cue nearest the playhead, and **[** / **]** jump to the previous/next cue. Cue
+changes share the undo stack with edits. A track holds at most 10 cues, the number
+Rekordbox's MEMORY CUE panel keeps. Cues belong to the edited track and move with
+it: a cut removes the cues inside it and shifts later ones; a duplicate shifts the
+cues after it and does not copy the cues inside the repeated bars. Each cue is kept
+as a bar and beat position, so tempo changes and nudges carry it along with the grid
+(a cue placed on a beat stays on that beat), while setting the downbeat again (D)
+keeps every cue at the same place in the audio.
+
 **Snapping.** Once the grid is placed (D, a nudge, or ⌥-drag), clicks snap to the
 finest grid division at least 12 px wide: sixteenths and eighths when zoomed in, then
 beats, half bars, bars, and multiples of bars as you zoom out. The grid draws exactly
@@ -226,16 +239,19 @@ can put the playhead on the first kick.
 | I / O | Selection start/end at the nearest bar line |
 | X or Delete | Cut selection |
 | ⌘D | Duplicate selection |
-| ⌘Z / ⌘⇧Z | Undo/redo edits |
+| C | Add a memory cue at the playhead |
+| ⇧C | Remove the memory cue nearest the playhead |
+| [ / ] | Jump to the previous/next memory cue |
+| ⌘Z / ⌘⇧Z | Undo/redo edits and cue changes |
 | P | Play into the selection |
 | ⌘S | Save edit |
 | Esc | Stop (or leave the BPM/bars field without applying) |
 
-Grid, edits, and undo history are remembered per track until the app quits, so
+Grid, edits, cues, and undo history are remembered per track until the app quits, so
 closing the editor never loses anything. Unsaved edits show as "• unsaved" in the
 editor and as the dot in its close button. Quitting (or closing the main window)
-with unsaved edits lists the affected tracks and asks first, with Cancel as the
-default. Grid-only changes (BPM, downbeat) don't count as unsaved. Edits
+with unsaved edits or cue changes lists the affected tracks and asks first, with
+Cancel as the default. Grid-only changes (BPM, downbeat) don't count as unsaved. Edits
 are stored as bar numbers, so tweaking the BPM or downbeat afterwards keeps them on
 the same bars. Only 4/4 at a constant tempo is supported.
 

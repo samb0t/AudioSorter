@@ -1058,6 +1058,74 @@ assert(samples == (0..<100).map { Metronome.click(at: 0.25 + Double($0) / 44_100
             result = subprocess.run(["swift", str(script)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_memory_cues_through_cut_duplicate_undo_and_regrid(self):
+        source = Path(__file__).with_name("main.swift").read_text().split("let app = NSApplication.shared", 1)[0]
+        harness = r'''
+func close(_ a: [Double], _ b: [Double]) -> Bool { a.count == b.count && zip(a, b).allSatisfy { abs($0 - $1) < 1e-9 } }
+// 120 BPM: two-second bars, first downbeat at 0.5 s, 21-second track.
+let duration = 21.0
+var session = EditSession(grid: BeatGrid(bpm: 120, anchor: 0.5))
+for time in [4.5, 10.75, 0.25, 10.5, 12.5, 3.0] { try session.addCue(at: time, duration: duration) }
+// Stored as beats from the anchor, sorted; the pickup cue is before beat 0.
+assert(close(session.cues, [-0.5, 5, 8, 20, 20.5, 24]))
+do { try session.addCue(at: 4.5005, duration: duration); fatalError("Expected duplicate cue") } catch {}
+assert(session.cues.count == 6 && session.undo.count == 6 && session.unsaved && !session.edited)
+session.savedCues = session.cues
+assert(!session.unsaved)
+// Cutting bars 3–5 (4.5–10.5 s) drops the cues inside, including one on its first downbeat;
+// a cue on the downbeat after the cut moves to the splice.
+session.selection = 2
+session.bars = 3
+try session.edit(duplicate: false, duration: duration)
+assert(close(session.cueTimes(duration), [0.25, 3.0, 4.5, 4.75, 6.5]))
+assert(session.undo.count == 7 && session.cueUndo.count == 7)
+// Undo and redo restore pieces and cues together.
+assert(session.undoLast() && session.pieces == EditSession.untouched && close(session.cueTimes(duration), [0.25, 3.0, 4.5, 10.5, 10.75, 12.5]))
+assert(session.redoLast() && close(session.cueTimes(duration), [0.25, 3.0, 4.5, 4.75, 6.5]))
+// Duplicating bar 2 (2.5–4.5 s) shifts the cues after it and does not copy the one inside.
+session.selection = 1
+session.bars = 1
+try session.edit(duplicate: true, duration: duration)
+assert(close(session.cueTimes(duration), [0.25, 3.0, 6.5, 6.75, 8.5]))
+// Cue changes are undoable like edits; removing takes the cue nearest the time.
+let removed = try session.removeCue(nearest: 6.6, duration: duration)
+assert(removed == 6.5)
+assert(close(session.cueTimes(duration), [0.25, 3.0, 6.75, 8.5]))
+assert(session.undoLast() && session.cues.count == 5 && session.redoLast() && session.cues.count == 4)
+// A tempo change keeps each cue on its bar and beat, like the edit's bar numbers.
+let beats = session.cues
+session.grid = BeatGrid(bpm: 100, anchor: 0.5)
+assert(session.cues == beats && close(session.cueTimes(duration), beats.map { 0.5 + $0 * 0.6 }))
+session.grid = BeatGrid(bpm: 120, anchor: 0.5)
+// Moving the downbeat by a beat keeps cues on the audio; by 20 ms, they follow their beat lines.
+let times = session.cueTimes(duration)
+session.regrid(BeatGrid(bpm: 120, anchor: 1.0))
+assert(close(session.cueTimes(duration), times) && close(session.cues, beats.map { $0 - 1 }))
+session.regrid(BeatGrid(bpm: 120, anchor: 1.02))
+assert(close(session.cueTimes(duration), times.map { $0 + 0.02 }))
+// Undo entries were remapped with the grid, so undoing still lines up.
+assert(session.undoLast() && close(session.cueTimes(duration), [0.27, 3.02, 6.52, 6.77, 8.52]))
+// Cutting the opening bar re-anchors the grid at 0; cues keep their place in the audio.
+var intro = EditSession(grid: BeatGrid(bpm: 120, anchor: 4))
+try intro.addCue(at: 6.0, duration: duration)
+try intro.addCue(at: 1.0, duration: duration)
+intro.selection = intro.grid.firstBar
+intro.bars = 1
+try intro.edit(duplicate: false, duration: duration)
+assert(intro.outputGrid(duration).anchor == 0 && close(intro.cueTimes(duration), [4.0]))
+// Rekordbox keeps ten memory cues; an eleventh is refused.
+var full = EditSession(grid: BeatGrid(bpm: 120, anchor: 0))
+for beat in 0..<10 { try full.addCue(at: Double(beat), duration: duration) }
+do { try full.addCue(at: 10.5, duration: duration); fatalError("Expected cue limit") } catch {}
+var empty = EditSession(grid: BeatGrid(bpm: 120, anchor: 0))
+do { _ = try empty.removeCue(nearest: 1, duration: duration); fatalError("Expected no cues") } catch {}
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            script = Path(directory) / "main.swift"
+            script.write_text(source + harness)
+            result = subprocess.run(["swift", str(script)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg unavailable")
     def test_editor_peaks_decoding_and_saving_end_to_end(self):
         import math
@@ -1256,6 +1324,28 @@ assert(editor.metronome.snapshot.end == editor.timeline.duration && editor.metro
 editor.clickButton.state = .off
 editor.clickChanged()
 assert(!editor.metronome.snapshot.enabled)
+// Memory cue keys: C adds at the playhead, ⇧C removes the nearest, [ and ] jump, ⌘Z undoes.
+func key(_ characters: String, _ code: UInt16, _ flags: NSEvent.ModifierFlags = []) -> Bool {
+    let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0, windowNumber: editor.window!.windowNumber,
+                                 context: nil, characters: characters, charactersIgnoringModifiers: characters, isARepeat: false, keyCode: code)!
+    return editor.handle(event)
+}
+func near(_ a: [Double], _ b: [Double]) -> Bool { a.count == b.count && zip(a, b).allSatisfy { abs($0 - $1) < 1e-9 } }
+editor.window?.makeFirstResponder(editor.waveform)
+assert(editor.session.cues.isEmpty && editor.cueLabel.stringValue == "0/10 memory cues")
+editor.playhead = 0.6
+assert(key("c", 8))
+editor.playhead = 1.8
+assert(key("c", 8))
+assert(near(editor.waveform.cues, [0.6, 1.8]) && editor.overview.cues == editor.waveform.cues && editor.cueLabel.stringValue == "2/10 memory cues")
+assert(editor.status.stringValue.hasPrefix("Memory cue at bar 1.4"), editor.status.stringValue)
+editor.playhead = 0
+assert(key("]", 30) && abs(editor.playhead - 0.6) < 1e-9 && key("]", 30) && abs(editor.playhead - 1.8) < 1e-9)
+assert(key("[", 33) && abs(editor.playhead - 0.6) < 1e-9)
+editor.playhead = 1.7
+assert(key("C", 8, .shift) && near(editor.waveform.cues, [0.6]))
+assert(key("z", 6, .command) && near(editor.waveform.cues, [0.6, 1.8]))
+assert(editor.session.unsaved && editor.window?.isDocumentEdited == true)
 '''
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

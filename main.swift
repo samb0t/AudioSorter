@@ -1517,19 +1517,34 @@ struct Piece: Equatable { var from: Bound; var to: Bound }
 
 struct EditSession {
     static let untouched = [Piece(from: .start, to: .end)]
+    // Rekordbox's MEMORY CUE panel holds ten cues per track.
+    static let cueLimit = 10
     var grid: BeatGrid
     var pieces = untouched
     var selection: Int?  // First selected bar of the edited track.
     var bars = 16
     // Clicks snap only once the grid has been placed; until then it is a guess.
     var downbeatSet = false
+    // Memory cues on the edited track, in beats from its grid's anchor (outputGrid), sorted.
+    // Edits are whole bars, so a cut or duplicate moves later cues by exactly its length in
+    // beats. Tempo changes and nudges keep each cue on its bar and beat, the same way pieces
+    // keep their bar numbers, so a cue placed on the grid stays on it. Moving the downbeat
+    // (regrid) keeps every beat line's cues at the same time, so they stay on the audio.
+    // Source times would not survive a tempo change: the splices move within the source,
+    // so a cue near one could end up in audio that is no longer part of the edit.
+    var cues: [Double] = []
+    // Undo entries pair each pieces snapshot with the cues at that moment.
     var undo: [[Piece]] = []
     var redo: [[Piece]] = []
+    var cueUndo: [[Double]] = []
+    var cueRedo: [[Double]] = []
     // The pieces last written to disk; nil until the first save.
     var savedPieces: [Piece]?
+    // The cues last recorded for Rekordbox, with an edit or with "Save grid & cues".
+    var savedCues: [Double] = []
     var edited: Bool { pieces != Self.untouched }
     // Grid-only changes do not count: they never change what a save would lose.
-    var unsaved: Bool { edited && pieces != savedPieces }
+    var unsaved: Bool { (edited && pieces != savedPieces) || cues != savedCues }
 
     func time(_ bound: Bound, duration: Double) -> Double {
         switch bound {
@@ -1595,10 +1610,18 @@ struct EditSession {
         var updated = both
         if duplicate { updated.insert(contentsOf: both[from..<to], at: to) }
         else { updated.removeSubrange(from..<to) }
-        undo.append(pieces)
-        redo.removeAll()
+        remember()
         pieces = normalized(updated, duration: duration)
         if duplicate { self.selection = selection + bars }
+        // Cues in a cut go with it; a duplicate does not copy cues. Cutting the opening bars can
+        // move the anchor to 0, so positions go through time rather than shifting the beat count.
+        let after = outputGrid(duration), length = end - start
+        cues = cues.compactMap { cue in
+            var time = output.anchor + cue * output.beatDuration
+            if time >= end - 1e-6 { time += duplicate ? length : -length }
+            else if !duplicate && time >= start - 1e-6 { return nil }
+            return (time - after.anchor) / after.beatDuration
+        }
     }
 
     // Moves every bar bound to the bar nearest its old time under the new grid.
@@ -1609,11 +1632,74 @@ struct EditSession {
             return bound
         }
         func remapAll(_ pieces: [Piece]) -> [Piece] { pieces.map { Piece(from: remap($0.from), to: remap($0.to)) } }
+        // Each cue's beat line becomes the new line nearest it; the offset from that line is kept.
+        // A track that starts on a bar line has its grid anchored at 0, which does not move.
+        func remapCues(_ cues: [Double], _ pieces: [Piece]) -> [Double] {
+            guard pieces.first?.from ?? .start == .start else { return cues }
+            return cues.map { cue in
+                let line = cue.rounded()
+                return ((old.anchor + line * old.beatDuration - updated.anchor) / updated.beatDuration).rounded() + cue - line
+            }
+        }
+        cues = remapCues(cues, pieces)
+        cueUndo = zip(cueUndo, undo).map(remapCues)
+        cueRedo = zip(cueRedo, redo).map(remapCues)
+        savedCues = remapCues(savedCues, savedPieces ?? pieces)
         pieces = remapAll(pieces)
         undo = undo.map(remapAll)
         redo = redo.map(remapAll)
         savedPieces = savedPieces.map(remapAll)
         grid = updated
+    }
+
+    // Every change to pieces or cues goes on one undo stack.
+    mutating func remember() {
+        undo.append(pieces)
+        cueUndo.append(cues)
+        redo.removeAll()
+        cueRedo.removeAll()
+    }
+
+    mutating func undoLast() -> Bool {
+        guard let previous = undo.popLast(), let previousCues = cueUndo.popLast() else { return false }
+        redo.append(pieces)
+        cueRedo.append(cues)
+        pieces = previous
+        cues = previousCues
+        return true
+    }
+
+    mutating func redoLast() -> Bool {
+        guard let next = redo.popLast(), let nextCues = cueRedo.popLast() else { return false }
+        undo.append(pieces)
+        cueUndo.append(cues)
+        pieces = next
+        cues = nextCues
+        return true
+    }
+
+    // Cue positions in seconds on the edited track.
+    func cueTimes(_ duration: Double) -> [Double] {
+        let output = outputGrid(duration)
+        return cues.map { output.anchor + $0 * output.beatDuration }
+    }
+
+    mutating func addCue(at time: Double, duration: Double) throws {
+        let output = outputGrid(duration)
+        guard cueTimes(duration).allSatisfy({ abs($0 - time) >= 0.001 }) else { throw EditError("There is already a cue here.") }
+        guard cues.count < Self.cueLimit else { throw EditError("Rekordbox keeps at most \(Self.cueLimit) memory cues per track. Remove one first (⇧C).") }
+        remember()
+        cues.append((time - output.anchor) / output.beatDuration)
+        cues.sort()
+    }
+
+    // Removes the cue nearest an edited-track time and returns where it was.
+    mutating func removeCue(nearest time: Double, duration: Double) throws -> Double {
+        let times = cueTimes(duration)
+        guard let index = times.indices.min(by: { abs(times[$0] - time) < abs(times[$1] - time) }) else { throw EditError("There are no cues to remove.") }
+        remember()
+        cues.remove(at: index)
+        return times[index]
     }
 }
 
@@ -1859,6 +1945,7 @@ final class EditWaveformView: NSView {
     var timeline: EditTimeline? { didSet { rawCache = nil; if fitted { fit() } else { clampView() } } }
     var sampleFile: AVAudioFile? { didSet { rawCache = nil } }
     var selection: (start: Double, end: Double)? { didSet { needsDisplay = true } }
+    var cues: [Double] = [] { didSet { if cues != oldValue { needsDisplay = true } } }
     var playhead: Double = 0 { didSet { if playhead != oldValue { needsDisplay = true } } }
     var visibleStart = 0.0
     var secondsPerPixel = 0.01
@@ -2026,6 +2113,20 @@ final class EditWaveformView: NSView {
         for junction in timeline.junctions {
             NSRect(x: x(for: Double(junction) / rate) - 1, y: 0, width: 2, height: bounds.height - labelHeight).fill()
         }
+        // Memory cues: a line with a triangle hanging from the top, like Rekordbox's markers.
+        NSColor.systemGreen.setFill()
+        for cue in cues {
+            let position = x(for: cue)
+            guard position > -8, position < bounds.width + 8 else { continue }
+            NSRect(x: position, y: 0, width: 1, height: bounds.height - labelHeight).fill()
+            let marker = NSBezierPath()
+            let top = bounds.height - labelHeight
+            marker.move(to: NSPoint(x: position - 6, y: top))
+            marker.line(to: NSPoint(x: position + 7, y: top))
+            marker.line(to: NSPoint(x: position + 0.5, y: top - 9))
+            marker.close()
+            marker.fill()
+        }
         NSColor.labelColor.setFill()
         NSRect(x: x(for: playhead), y: 0, width: 1, height: bounds.height).fill()
     }
@@ -2130,6 +2231,7 @@ final class EditOverviewView: NSView {
     var duration = 0.0
     var visible: (start: Double, end: Double) = (0, 0) { didSet { needsDisplay = true } }
     var selection: (start: Double, end: Double)? { didSet { needsDisplay = true } }
+    var cues: [Double] = [] { didSet { if cues != oldValue { needsDisplay = true } } }
     var playhead = 0.0 { didSet { if playhead != oldValue { needsDisplay = true } } }
     var onSelect: ((Double) -> Void)?
 
@@ -2163,6 +2265,10 @@ final class EditOverviewView: NSView {
         let window = NSBezierPath(rect: NSRect(x: x(for: visible.start), y: 0.5, width: max(2, x(for: visible.end) - x(for: visible.start)), height: bounds.height - 1))
         window.lineWidth = 1.5
         window.stroke()
+        NSColor.systemGreen.setFill()
+        for cue in cues {
+            NSRect(x: x(for: cue) - 1, y: bounds.height - 8, width: 3, height: 8).fill()
+        }
         NSColor.labelColor.setFill()
         NSRect(x: x(for: playhead), y: 0, width: 1, height: bounds.height).fill()
     }
@@ -2212,6 +2318,7 @@ final class EditorController: NSWindowController, NSWindowDelegate {
     let snapButton = NSButton(checkboxWithTitle: "Snap (⌘-click: free)", target: nil, action: nil)
     let clickButton = NSButton(checkboxWithTitle: "Click  M", target: nil, action: nil)
     let writeBPMButton = NSButton(title: "Write BPM to tag", target: nil, action: nil)
+    let cueLabel = NSTextField(labelWithString: "")
     // The original file's BPM tag, so writing it is only offered when it would change.
     var taggedBPM: Double?
     let metronome = Metronome()
@@ -2293,9 +2400,15 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         let editRow = NSStackView(views: [cutButton, duplicateButton, undoButton, redoButton, editLabel, saveButton])
         editRow.spacing = 8
         content.addArrangedSubview(editRow)
+        let cueRow = NSStackView(views: [
+            button("Memory cue  C", #selector(addCue)), button("Remove nearest  ⇧C", #selector(removeCue)),
+            button("◀ Cue  [", #selector(previousCue)), button("Cue ▶  ]", #selector(nextCue)), cueLabel
+        ])
+        cueRow.spacing = 8
+        content.addArrangedSubview(cueRow)
         status.textColor = .secondaryLabelColor
         content.addArrangedSubview(status)
-        let help = NSTextField(wrappingLabelWithString: "Click to place the playhead • Scroll to move • Pinch, ⌘/⌥-scroll or = / − to zoom, 0 fits • ⌥-drag slides the grid • ← / → beat, ⇧ bar • Shift+, / . nudges 10 ms • T taps tempo • M click • Esc stops")
+        let help = NSTextField(wrappingLabelWithString: "Click to place the playhead • Scroll to move • Pinch, ⌘/⌥-scroll or = / − to zoom, 0 fits • ⌥-drag slides the grid • ← / → beat, ⇧ bar • Shift+, / . nudges 10 ms • T taps tempo • M click • C cue • Esc stops")
         help.textColor = .tertiaryLabelColor
         help.font = .systemFont(ofSize: 11)
         content.addArrangedSubview(help)
@@ -2429,6 +2542,10 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         editLabel.stringValue = session.edited
             ? "\(stamp(duration)) → \(stamp(timeline.duration)) • \(junctions) splice\(junctions == 1 ? "" : "s")\(session.unsaved ? " • unsaved" : "")"
             : "Unedited"
+        let cues = session.cueTimes(duration)
+        waveform.cues = cues
+        overview.cues = cues
+        cueLabel.stringValue = "\(cues.count)/\(EditSession.cueLimit) memory cues"
         window?.isDocumentEdited = session.unsaved
         saveButton.isEnabled = session.edited && !saving
         writeBPMButton.isEnabled = taggedBPM != tagBPM && !saving
@@ -2462,11 +2579,18 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         if normalized != overview.levels { overview.levels = normalized }
     }
 
-    func updatePosition() {
+    // Bar and beat on the edited track, as in "5.1".
+    func barBeat(_ time: Double) -> String {
         let grid = timeline.grid
-        let beats = Int(((playhead - grid.anchor) / grid.beatDuration + 1e-6).rounded(.down))
+        let beats = Int(((time - grid.anchor) / grid.beatDuration + 1e-6).rounded(.down))
         let bar = Int((Double(beats) / 4).rounded(.down))
-        positionLabel.stringValue = "Bar \(grid.number(bar)).\(beats - bar * 4 + 1)   \(stamp(playhead)) / \(stamp(timeline.duration))"
+        return "\(grid.number(bar)).\(beats - bar * 4 + 1)"
+    }
+
+    func position(_ time: Double) -> String { "bar \(barBeat(time)) (\(stamp(time)))" }
+
+    func updatePosition() {
+        positionLabel.stringValue = "Bar \(barBeat(playhead))   \(stamp(playhead)) / \(stamp(timeline.duration))"
         playButton.title = playing ? "Pause  Space" : "Play  Space"
         waveform.playhead = playhead
         overview.playhead = playhead
@@ -2510,6 +2634,9 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         case "o": setSelectionEnd(); return true
         case "p": previewSelection(); return true
         case "x": cutSelection(); return true
+        case "c": shift ? removeCue() : addCue(); return true
+        case "[", "{": previousCue(); return true
+        case "]", "}": nextCue(); return true
         case ",", "<": nudge(shift ? -0.01 : -0.001); return true
         case ".", ">": nudge(shift ? 0.01 : 0.001); return true
         default: return false
@@ -2750,20 +2877,54 @@ final class EditorController: NSWindowController, NSWindowDelegate {
     @objc func duplicateSelection() { applyEdit(duplicate: true) }
 
     @objc func undoEdit() {
-        guard let previous = session.undo.popLast() else { return }
-        if playing { stopAndKeepPosition() }
-        session.redo.append(session.pieces)
-        session.pieces = previous
-        refresh()
+        if playing && !session.undo.isEmpty { stopAndKeepPosition() }
+        if session.undoLast() { refresh() }
     }
 
     @objc func redoEdit() {
-        guard let next = session.redo.popLast() else { return }
-        if playing { stopAndKeepPosition() }
-        session.undo.append(session.pieces)
-        session.pieces = next
-        refresh()
+        if playing && !session.redo.isEmpty { stopAndKeepPosition() }
+        if session.redoLast() { refresh() }
     }
+
+    // MARK: Memory cues
+
+    // A stopped playhead is already where a click or arrow key put it, snapped or not. While
+    // playing, a cue snaps to the nearest beat when snapping is on.
+    @objc func addCue() {
+        let grid = timeline.grid
+        var time = playing ? (renderedPosition().map { Double($0) / rate } ?? playhead) : playhead
+        if playing && waveform.snapping { time = grid.anchor + ((time - grid.anchor) / grid.beatDuration).rounded() * grid.beatDuration }
+        time = min(max(0, time), timeline.duration)
+        do {
+            try session.addCue(at: time, duration: duration)
+            refresh()
+            status.stringValue = "Memory cue at \(position(time)). ⇧C removes the nearest cue; [ and ] jump between cues."
+        } catch {
+            status.stringValue = error.localizedDescription
+            NSSound.beep()
+        }
+    }
+
+    @objc func removeCue() {
+        do {
+            let time = try session.removeCue(nearest: playhead, duration: duration)
+            refresh()
+            status.stringValue = "Removed the memory cue at \(position(time)). ⌘Z brings it back."
+        } catch {
+            status.stringValue = error.localizedDescription
+            NSSound.beep()
+        }
+    }
+
+    func jumpToCue(_ direction: Int) {
+        let times = session.cueTimes(duration)
+        guard let target = direction > 0 ? times.first(where: { $0 > playhead + 1e-4 }) : times.last(where: { $0 < playhead - 1e-4 }) else { NSSound.beep(); return }
+        seek(to: target)
+        waveform.follow(playhead)
+    }
+
+    @objc func previousCue() { jumpToCue(-1) }
+    @objc func nextCue() { jumpToCue(1) }
 
     // MARK: Saving
 
