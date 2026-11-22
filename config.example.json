@@ -8,5 +8,6 @@
     { "directory": "Review" }
   ],
   "startAtThirtyPercent": true,
-  "editSuffix": "Edit"
+  "editSuffix": "Edit",
+  "rekordboxXML": "~/Music/Audio Sorter/rekordbox.xml"
 }

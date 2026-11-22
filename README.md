@@ -55,6 +55,9 @@ You can still edit the local config manually and restart; no rebuild is needed.
   loaded track is positioned 30% into its duration; `false` starts at the beginning.
 - `editSuffix`: name used for bar edits, saved as `<name> - <editSuffix>.<ext>`
   beside the original; `Edit` when omitted. Also editable in Settings.
+- `rekordboxXML`: the rekordbox XML file the app keeps up to date with recorded
+  grids and memory cues (see [Exporting to Rekordbox](#exporting-to-rekordbox));
+  `~/Music/Audio Sorter/rekordbox.xml` when omitted. Also editable in Settings.
 
 ## Keys
 
@@ -202,6 +205,11 @@ an editor for removing or repeating whole bars, the way you would in Ableton:
    list, so 1–9 sorts it right away. The original stays listed, usually just above
    it alphabetically (other versions of the same title can sort in between), so you
    can sort or trash it too. Reopening the original (B) restores its grid and edits.
+   Once the downbeat is set, the save also records the edit's grid and cues for
+   Rekordbox.
+6. **Record the original** (**⌘⇧S**, **Save grid & cues**) when you want the
+   original itself in Rekordbox with this grid and cues. See
+   [Exporting to Rekordbox](#exporting-to-rekordbox).
 
 **Memory cues.** **C** adds a memory cue at the playhead: green markers on the
 waveform and the overview strip, with the count beside the cue buttons. A stopped
@@ -244,7 +252,8 @@ can put the playhead on the first kick.
 | [ / ] | Jump to the previous/next memory cue |
 | ⌘Z / ⌘⇧Z | Undo/redo edits and cue changes |
 | P | Play into the selection |
-| ⌘S | Save edit |
+| ⌘S | Save edit (and record its grid and cues once the downbeat is set) |
+| ⌘⇧S | Save grid & cues: record the original's grid and cues for Rekordbox |
 | Esc | Stop (or leave the BPM/bars field without applying) |
 
 Grid, edits, cues, and undo history are remembered per track until the app quits, so
@@ -290,6 +299,55 @@ fades.
   `MLLT`/`ETCO`/`SYTC`/`SYLT`/`ASPI`/`POSS`, Serato `GEOB` frames, and Traktor
   `PRIV:TRAKTOR4`. The save message lists anything removed. Re-analyze the edit in
   your DJ software.
+
+## Exporting to Rekordbox
+
+Audio Sorter is where a track's beat grid and memory cues get set; Rekordbox (7.0 or
+later) imports them from a rekordbox XML file and is left for building playlists.
+
+**What gets recorded.** Nothing is sent to Rekordbox until you record it, and only
+once the downbeat is set (D), because Rekordbox's bar 1 comes from it:
+- **⌘S** in Cut Bars saves an edit and records the *edit file*: the edited track's
+  grid and its cues at save time. Without a downbeat the edit is still saved, just
+  not recorded; open the edit, set the downbeat and press ⌘⇧S.
+- **⌘⇧S** (**Save grid & cues**) records the *original*: its grid, plus its cues
+  mapped back to where they play in the original. Cues in duplicated audio have no
+  single place in the original, so they are left out and the status line says how
+  many; save the edit to keep them. The audio file is not changed.
+
+Records live in `~/Library/Application Support/Audio Sorter/grids.json`, keyed by
+the file's path and replaced atomically, so they survive quitting. Opening a
+recorded track in Cut Bars restores its grid and cues (until the app quits, a track's
+in-memory session, including unsaved edits, takes precedence). Moving a file with
+1–9, undoing the move (⌘Z), and moving it to Trash update its record; comment,
+Genre and BPM tag writes don't touch the audio timeline, so records stay valid.
+
+**File → Rekordbox Records…** lists every record. Files renamed or deleted outside
+the app show as **Missing**, and trashed ones as **In Trash**, at the top in red;
+they are never dropped silently, but they are left out of the XML. Put the file
+back to make its record current again, or select it and **Forget selected…**. At
+launch, the main window's status line mentions any missing records.
+
+**The XML.** After every change the whole XML is regenerated from the records and
+replaced atomically, including only files that exist. Change its location in
+**Settings** (`rekordboxXML`). For each track it contains:
+- Name, Artist, Album, Genre and Comments from the file's tags (RIFF INFO first for
+  WAV, as Rekordbox reads it), falling back to the file name; Kind, Size, TotalTime,
+  SampleRate and BitRate; and `Location` as a percent-encoded `file://localhost/`
+  URL, so spaces, `&`, `#`, `%` and accented names survive.
+- The BPM, to 0.01 BPM (Rekordbox's precision; the editor's exact grid is kept in
+  the record), and one `TEMPO` at the first beat at or after 0 s. Its `Battito`
+  (beat in the bar) puts beat 1 on the downbeat set in the editor; a pickup before
+  bar 1 starts on beat 2, 3 or 4. The grid is computed from your downbeat, so it is
+  exact there even after rounding the BPM.
+- Memory cues (`POSITION_MARK` with `Num="-1"`), at most 10 per track.
+
+Not exported: hot cues (never written), loops, cue names and colours, playlists,
+key, variable tempo, and time signatures other than 4/4.
+
+Not yet verified in Rekordbox: whether "Import To Collection" updates a track that is
+already in the collection, and whether MP3 positions need an offset. Both are being
+checked; until then, try a few tracks first.
 
 ## Check destination tags
 

@@ -4,7 +4,22 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import os
 import unittest
+
+SUPPORT = None
+
+
+def setUpModule():
+    # The grid store must never be the user's: every Swift run inherits this folder.
+    global SUPPORT
+    SUPPORT = tempfile.TemporaryDirectory()
+    os.environ["AUDIO_SORTER_SUPPORT"] = SUPPORT.name
+
+
+def tearDownModule():
+    os.environ.pop("AUDIO_SORTER_SUPPORT", None)
+    SUPPORT.cleanup()
 
 
 @unittest.skipUnless(shutil.which("swift"), "Swift unavailable")
@@ -675,7 +690,15 @@ class Player {
     var isPlaying = true
     func stop() { isPlaying = false }
 }
+// Records follow trashed files; only a successful Trash marks one.
+enum GridStore { static func key(_ url: URL) -> String { url.path } }
+class Store {
+    var trashed: [String] = []
+    func markTrashed(_ key: String) throws -> Bool { trashed.append(key); return true }
+}
 class Sorter {
+    let gridStore = Store()
+    func updateRecords(_ change: () throws -> Bool) -> String { _ = try? change(); return "" }
     var files: [URL]
     var repairingGenres = false
     var index = 1
@@ -712,7 +735,7 @@ let current = Sorter(urls)
 assert(current.trashFile(urls[1]))
 assert(current.files == [urls[0], urls[2]])
 assert(current.saveCalls == 1)
-assert(current.trashCalls == [urls[1]])
+assert(current.trashCalls == [urls[1]] && current.gridStore.trashed == [urls[1].path])
 assert(current.selected?.0 == 1 && current.selected?.1 == true)
 assert(current.comment.string.isEmpty)
 // Context target before current: preserve playback, current track, and dirty text.
@@ -744,6 +767,7 @@ trashFailure.trashFails = true
 assert(!trashFailure.trashFile(urls[1]))
 assert(trashFailure.errors == 1 && trashFailure.files == urls && trashFailure.index == 1)
 assert(trashFailure.player?.isPlaying == true && trashFailure.comment.string == "unsaved")
+assert(trashFailure.gridStore.trashed.isEmpty)
 // Stale, missing, directory, and symlink targets must not reach Trash.
 assert(!trashFailure.trashFile(root.appendingPathComponent("not queued.mp3")))
 let link = root.appendingPathComponent("link.mp3")
@@ -910,13 +934,16 @@ var customized = paired
 customized.sourceFolder = "/new/source"
 customized.destinationRoot = "/new/destinations"
 customized.startAtThirtyPercent = false
+assert(customized.rekordboxXML == "~/Music/Audio Sorter/rekordbox.xml")
+customized.rekordboxXML = "/xml/rekordbox.xml"
 let saved = try JSONDecoder().decode(Configuration.self, from: encoder.encode(customized))
+assert(saved.rekordboxXML == "/xml/rekordbox.xml")
 assert(saved.sourceFolder == customized.sourceFolder)
 assert(saved.destinationRoot == customized.destinationRoot)
 assert(!saved.startAtThirtyPercent)
-for pathKey in ["sourceFolder", "destinationRoot"] {
+for (pathKey, value) in [("sourceFolder", "  "), ("destinationRoot", "  "), ("rekordboxXML", "  "), ("rekordboxXML", "/xml/")] {
     var json: [String: Any] = ["sourceFolder": "/source", "destinationRoot": "/music", "destinations": ["House"]]
-    json[pathKey] = "  "
+    json[pathKey] = value
     do {
         _ = try JSONDecoder().decode(Configuration.self, from: JSONSerialization.data(withJSONObject: json))
         fatalError("Empty directory accepted")
@@ -1113,6 +1140,17 @@ intro.selection = intro.grid.firstBar
 intro.bars = 1
 try intro.edit(duplicate: false, duration: duration)
 assert(intro.outputGrid(duration).anchor == 0 && close(intro.cueTimes(duration), [4.0]))
+// Mapping back to the original: a cut shifts later audio back; duplicated audio has no single place.
+var mapped = EditSession(grid: BeatGrid(bpm: 120, anchor: 0.5))
+mapped.selection = 1
+mapped.bars = 1
+try mapped.edit(duplicate: false, duration: duration)
+var cut = EditTimeline(session: mapped, rate: 1000, frames: 21_000)
+assert(cut.uniqueSourceTime(1.0) == 1.0 && cut.uniqueSourceTime(2.75) == 4.75 && cut.uniqueSourceTime(19.0) == nil)
+mapped.selection = 0
+try mapped.edit(duplicate: true, duration: duration)
+cut = EditTimeline(session: mapped, rate: 1000, frames: 21_000)
+assert(cut.uniqueSourceTime(0.25) == 0.25 && cut.uniqueSourceTime(1.0) == nil && cut.uniqueSourceTime(3.0) == nil && cut.uniqueSourceTime(4.75) == 4.75)
 // Rekordbox keeps ten memory cues; an eleventh is refused.
 var full = EditSession(grid: BeatGrid(bpm: 120, anchor: 0))
 for beat in 0..<10 { try full.addCue(at: Double(beat), duration: duration) }
@@ -1124,6 +1162,211 @@ do { _ = try empty.removeCue(nearest: 1, duration: duration); fatalError("Expect
             script = Path(directory) / "main.swift"
             script.write_text(source + harness)
             result = subprocess.run(["swift", str(script)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_grid_records_persist_follow_moves_and_export_xml(self):
+        import math
+        import struct
+        import wave
+        source = Path(__file__).with_name("main.swift").read_text().split("let app = NSApplication.shared", 1)[0]
+        source = source.replace("final class Sorter:", "class Sorter:")
+        harness = r'''
+// The real Python helper, run from the repository rather than the app bundle.
+class TestSorter: Sorter {
+    var trashed: [URL] = []
+    override func helper(_ action: String, file: URL, text: String? = nil) throws -> [String: Any] {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: CommandLine.arguments[2])
+        process.arguments = [CommandLine.arguments[3], action, file.path]
+        let output = Pipe(), input = Pipe()
+        process.standardOutput = output
+        process.standardInput = input
+        try process.run()
+        if let text { try input.fileHandleForWriting.write(contentsOf: Data(text.utf8)) }
+        try input.fileHandleForWriting.close()
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        let result = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+        if process.terminationStatus != 0 { throw NSError(domain: "test", code: 1, userInfo: [NSLocalizedDescriptionKey: result["error"] as? String ?? "helper failed"]) }
+        return result
+    }
+    // A stand-in Trash folder; never the real one. No autoplay in tests.
+    override func sendToTrash(_ url: URL) throws {
+        trashed.append(url)
+        try FileManager.default.moveItem(at: url, to: root.appendingPathComponent("FakeTrash").appendingPathComponent(url.lastPathComponent))
+    }
+    override func select(_ newIndex: Int, autoplay: Bool) { super.select(newIndex, autoplay: false) }
+    override func report(_ error: Error) { fatalError("Unexpected error: \(error)") }
+}
+func settle(_ condition: () -> Bool) {
+    let deadline = Date().addingTimeInterval(60)
+    while !condition() && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+    assert(condition(), "timed out")
+}
+func near(_ a: [Double], _ b: [Double]) -> Bool { a.count == b.count && zip(a, b).allSatisfy { abs($0 - $1) < 1e-6 } }
+let app = NSApplication.shared
+let root = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true).resolvingSymlinksInPath()
+// The default store is the test's temporary folder, never Application Support.
+assert(GridStore.defaultURL.path == ProcessInfo.processInfo.environment["AUDIO_SORTER_SUPPORT"]! + "/grids.json")
+let storeURL = root.appendingPathComponent("support/grids.json")
+let xmlURL = root.appendingPathComponent("out/rekordbox.xml")
+try FileManager.default.createDirectory(at: root.appendingPathComponent("FakeTrash"), withIntermediateDirectories: true)
+let sorter = TestSorter()
+sorter.window = NSWindow()
+sorter.gridStore = GridStore(url: storeURL)
+let config = ["destinationRoot": root.appendingPathComponent("dest").path, "destinations": [["directory": "House", "genre": "House"]], "rekordboxXML": xmlURL.path] as [String: Any]
+sorter.configuration = try JSONDecoder().decode(Configuration.self, from: JSONSerialization.data(withJSONObject: config))
+sorter.loadFolder(root, autoplay: false)
+let original = root.appendingPathComponent("Café & Co #1.wav")
+let edit = root.appendingPathComponent("Café & Co #1 - Edit.wav")
+assert(sorter.files.map(\.lastPathComponent) == [original.lastPathComponent])
+func exported() -> [String: XMLElement] {
+    settle { !sorter.exporting }
+    if case .failure(let error) = sorter.exportResult { fatalError("export failed: \(error)") }
+    let document = try! XMLDocument(contentsOf: xmlURL)
+    var result: [String: XMLElement] = [:]
+    for track in try! document.nodes(forXPath: "/DJ_PLAYLISTS/COLLECTION/TRACK") as! [XMLElement] {
+        let location = track.attribute(forName: "Location")!.stringValue!
+        assert(location.hasPrefix("file://localhost/"))
+        let path = String(location.dropFirst("file://localhost".count)).removingPercentEncoding!
+        assert(path == path.precomposedStringWithCanonicalMapping)
+        result[path] = track
+    }
+    return result
+}
+func starts(_ track: XMLElement) -> [String] { (track.elements(forName: "POSITION_MARK")).map { $0.attribute(forName: "Start")!.stringValue! } }
+
+// Recording needs the downbeat: Rekordbox's bar 1 comes from it.
+var editor = EditorController(sorter: sorter)
+sorter.editorController = editor
+editor.open(original)
+editor.saveGridAndCues()
+assert(editor.status.stringValue.hasPrefix("Set the downbeat") && !editor.recordButton.isEnabled)
+assert(sorter.gridStore.contents.tracks.isEmpty && !FileManager.default.fileExists(atPath: storeURL.path))
+// 120 BPM, downbeat at 0.5 s: bars are 2 s. Cues at 1.0 and 4.5, then bar 2 (2.5–4.5 s) duplicated:
+// the cue at 4.5 follows to 6.5, and cues at 2.5 and in the copy (4.5) play duplicated audio.
+editor.playhead = 0.5
+editor.setDownbeat()
+for time in [1.0, 2.5, 4.5] { editor.playhead = time; editor.addCue() }
+editor.session.selection = 1
+editor.session.bars = 1
+editor.duplicateSelection()
+editor.playhead = 4.5
+editor.addCue()
+assert(near(editor.session.cueTimes(editor.duration), [1.0, 2.5, 4.5, 6.5]))
+editor.handle(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.command, .shift], timestamp: 0, windowNumber: editor.window!.windowNumber,
+                               context: nil, characters: "S", charactersIgnoringModifiers: "S", isARepeat: false, keyCode: 1)!)
+assert(editor.status.stringValue.contains("2 memory cues") && editor.status.stringValue.contains("Left out 2 cues in duplicated audio"), editor.status.stringValue)
+let record = sorter.gridStore.record(for: original)!
+assert(record.bpm == 120 && record.anchor == 0.5 && near(record.cues, [1.0, 4.5]) && record.trackID == 1 && record.duration == 6)
+// The edit is still unsaved, but its cues count as recorded.
+assert(editor.session.cues == editor.session.savedCues && editor.session.unsaved)
+var tracks = exported()
+assert(Set(tracks.keys) == [original.path])
+let tempo = tracks[original.path]!.elements(forName: "TEMPO")[0]
+assert(tempo.attribute(forName: "Inizio")!.stringValue == "0.000" && tempo.attribute(forName: "Battito")!.stringValue == "4")
+assert(starts(tracks[original.path]!) == ["1.000", "4.500"])
+
+// The store persists: a new launch restores the grid and cues for an unedited session.
+let reloaded = GridStore(url: storeURL)
+assert(reloaded.contents.tracks == sorter.gridStore.contents.tracks && reloaded.contents.nextTrackID == 2)
+editor.window?.close()
+sorter.editSessions = [:]
+sorter.gridStore = reloaded
+editor = EditorController(sorter: sorter)
+sorter.editorController = editor
+editor.open(original)
+assert(editor.session.downbeatSet && !editor.session.edited && !editor.session.unsaved && editor.recordButton.isEnabled)
+assert(near(editor.session.cueTimes(editor.duration), [1.0, 4.5]) && editor.session.grid == BeatGrid(bpm: 120, anchor: 0.5))
+assert(editor.status.stringValue.hasSuffix("Restored the grid and 2 memory cues recorded for Rekordbox."), editor.status.stringValue)
+
+// Saving an edit records the edit file: its own grid and its cues at save time.
+editor.session.selection = 1
+editor.session.bars = 1
+editor.cutSelection()
+assert(near(editor.session.cueTimes(editor.duration), [1.0, 2.5]))
+editor.save()
+settle { !editor.saving }
+assert(editor.status.stringValue.hasSuffix("Recorded its grid and 2 memory cues for Rekordbox."), editor.status.stringValue)
+let editRecord = sorter.gridStore.record(for: edit)!
+assert(editRecord.anchor == 0.5 && near(editRecord.cues, [1.0, 2.5]) && editRecord.trackID == 2 && editRecord.duration == 4)
+tracks = exported()
+assert(Set(tracks.keys) == [edit.path, original.path] && starts(tracks[edit.path]!) == ["1.000", "2.500"])
+assert(tracks[edit.path]!.attribute(forName: "TrackID")!.stringValue == "2")
+
+// Sorting moves the record with the file; undoing the move brings it back.
+// The listing spells the new file's accent decomposed; keys treat both spellings as one file.
+assert(GridStore.key(sorter.files[sorter.index]) == GridStore.key(edit))
+assert(sorter.files[sorter.index].path != edit.path)
+let moved = root.appendingPathComponent("dest/House/" + edit.lastPathComponent)
+sorter.move(0)
+assert(sorter.gridStore.record(for: edit) == nil && sorter.gridStore.record(for: moved) == editRecord)
+tracks = exported()
+assert(Set(tracks.keys) == [moved.path, original.path] && tracks[moved.path]!.attribute(forName: "Genre")!.stringValue == "House")
+sorter.undoMove()
+assert(sorter.gridStore.record(for: moved) == nil && sorter.gridStore.record(for: edit) == editRecord)
+assert(Set(exported().keys) == [edit.path, original.path])
+// Tag writes leave the audio timeline alone, so records stay as they are.
+_ = try sorter.helper("write", file: edit, text: "Comment")
+assert(sorter.gridStore.record(for: edit) == editRecord)
+
+// Trash flags the record; a file renamed outside the app shows as missing. Neither is exported.
+let listed = sorter.files.first { GridStore.key($0) == GridStore.key(original) }!
+assert(sorter.trashFile(listed) && sorter.trashed == [listed])
+assert(sorter.gridStore.record(for: original)?.trashed == true && sorter.gridStore.status(original.path) == .trashed)
+let renamed = root.appendingPathComponent("Renamed in Finder.wav")
+try FileManager.default.moveItem(at: edit, to: renamed)
+assert(sorter.gridStore.status(edit.path) == .missing)
+sorter.exportRekordbox()
+assert(exported().isEmpty)
+if case .success(let report) = sorter.exportResult { assert((report["missing"] as! [String]).sorted() == [edit.path, original.path]) }
+sorter.showRecords()
+let records = sorter.recordsController!
+assert(records.keys.count == 2 && records.summary.stringValue.contains("2 point to a missing or trashed file"))
+assert(Set(records.keys.map(records.statusText)) == ["Missing", "In Trash"])
+// Putting the file back makes its record current again.
+try FileManager.default.moveItem(at: renamed, to: edit)
+assert(sorter.gridStore.status(edit.path) == .current)
+sorter.exportRekordbox()
+assert(Set(exported().keys) == [edit.path])
+// Forgetting removes a record from the store and the XML.
+records.forget([edit.path])
+assert(sorter.gridStore.record(for: edit) == nil && GridStore(url: storeURL).record(for: edit) == nil)
+assert(exported().isEmpty && sorter.gridStore.contents.tracks.count == 1)
+
+// A failed store write changes nothing, in memory or on disk.
+let before = try Data(contentsOf: storeURL)
+try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: storeURL.deletingLastPathComponent().path)
+do { try sorter.gridStore.forget([original.path]); fatalError("Expected a write failure") } catch {}
+try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: storeURL.deletingLastPathComponent().path)
+assert(sorter.gridStore.contents.tracks.count == 1)
+let after = try Data(contentsOf: storeURL)
+assert(after == before)
+// An unreadable store is never overwritten.
+let damaged = root.appendingPathComponent("support/damaged.json")
+try Data("{not json".utf8).write(to: damaged)
+let broken = GridStore(url: damaged)
+assert(broken.loadError != nil)
+do { try broken.set(edit, grid: BeatGrid(bpm: 120, anchor: 0), cues: [], duration: 1, sampleRate: 44_100); fatalError("Expected refusal") } catch {}
+let damagedAfter = try String(contentsOf: damaged, encoding: .utf8)
+assert(damagedAfter == "{not json")
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rate = 44100
+            frames = bytearray()
+            for i in range(rate * 6):
+                sample = int(20000 * math.sin(2 * math.pi * 220 * i / rate))
+                frames += struct.pack("<hh", sample, sample)
+            with wave.open(str(root / "Café & Co #1.wav"), "wb") as output:
+                output.setnchannels(2)
+                output.setsampwidth(2)
+                output.setframerate(rate)
+                output.writeframes(bytes(frames))
+            script = root / "main.swift"
+            script.write_text(source + harness)
+            helper = str(Path(__file__).with_name("comments.py"))
+            result = subprocess.run(["swift", str(script), directory, sys.executable, helper], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg unavailable")
@@ -1168,7 +1411,7 @@ class TestSorter: Sorter {
 let app = NSApplication.shared
 let root = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
 let sorter = TestSorter()
-sorter.configuration = try JSONDecoder().decode(Configuration.self, from: Data("{\"destinationRoot\":\"/unused\",\"destinations\":[\"A\"],\"editSuffix\":\"SamEdit\"}".utf8))
+sorter.configuration = try JSONDecoder().decode(Configuration.self, from: Data("{\"destinationRoot\":\"/unused\",\"destinations\":[\"A\"],\"editSuffix\":\"SamEdit\",\"rekordboxXML\":\"\(CommandLine.arguments[1])/rekordbox.xml\"}".utf8))
 assert(sorter.editURL(for: root.appendingPathComponent("a.b.mp3")).lastPathComponent == "a.b - SamEdit.mp3")
 sorter.source = root
 

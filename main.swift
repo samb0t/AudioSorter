@@ -30,8 +30,10 @@ struct Configuration: Codable {
     var startAtThirtyPercent: Bool = true
     // Bar edits are saved beside the original as "<name> - <editSuffix>.<ext>".
     var editSuffix: String = "Edit"
+    // Regenerated from the recorded grids and cues after every change; Rekordbox imports it.
+    var rekordboxXML: String = "~/Music/Audio Sorter/rekordbox.xml"
 
-    enum CodingKeys: String, CodingKey { case sourceFolder, destinationRoot, destinations, startAtThirtyPercent, editSuffix }
+    enum CodingKeys: String, CodingKey { case sourceFolder, destinationRoot, destinations, startAtThirtyPercent, editSuffix, rekordboxXML }
 
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -40,6 +42,10 @@ struct Configuration: Codable {
         destinations = try values.decode([Destination].self, forKey: .destinations)
         startAtThirtyPercent = try values.decodeIfPresent(Bool.self, forKey: .startAtThirtyPercent) ?? true
         editSuffix = try values.decodeIfPresent(String.self, forKey: .editSuffix) ?? "Edit"
+        rekordboxXML = try values.decodeIfPresent(String.self, forKey: .rekordboxXML) ?? "~/Music/Audio Sorter/rekordbox.xml"
+        guard !rekordboxXML.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !rekordboxXML.hasSuffix("/") else {
+            throw DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "The Rekordbox XML path must name a file."))
+        }
         guard !editSuffix.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !editSuffix.contains("/"), !editSuffix.hasPrefix(".") else {
             throw DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "The edit suffix must be nonempty, contain no slashes, and not start with a period."))
         }
@@ -91,6 +97,14 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
     var editorController: EditorController?
     // Grids and cuts set in the editor, remembered for the session.
     var editSessions: [URL: EditSession] = [:]
+    // Grids and cues recorded for Rekordbox, kept across launches; see GridStore.
+    lazy var gridStore = GridStore(url: GridStore.defaultURL)
+    var recordsController: RecordsController?
+    let exportQueue = DispatchQueue(label: "AudioSorter.rekordbox", qos: .utility)
+    var exporting = false
+    var exportPending = false
+    // The last export's report from rekordbox.py (tracks, missing, failed), or why it failed.
+    var exportResult: Result<[String: Any], Error>?
     // Main-thread gate: existing sorting/comment/undo operations are synchronous.
     // Set before launching the worker, release only after every helper has exited.
     var repairingGenres = false
@@ -229,6 +243,13 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         timer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] _ in self?.updateTime() }
         let initial = UserDefaults.standard.string(forKey: "source") ?? configuration.sourceFolder
         loadFolder(Configuration.expand(initial), autoplay: false)
+        // Files renamed or deleted in Finder since the last launch drop out of the XML now.
+        if !gridStore.contents.tracks.isEmpty || gridStore.loadError != nil {
+            let missing = gridStore.contents.tracks.keys.filter { gridStore.status($0) != .current }.count
+            if gridStore.loadError != nil { status.stringValue += "  •  The Rekordbox record store cannot be read; see File → Rekordbox Records…" }
+            else if missing > 0 { status.stringValue += "  •  \(missing) Rekordbox record\(missing == 1 ? "" : "s") point to missing files; see File → Rekordbox Records…" }
+            exportRekordbox()
+        }
         window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -263,6 +284,8 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         cut.target = self
         let lint = fileMenu.addItem(withTitle: "Check destination tags…", action: #selector(checkDestinationTags), keyEquivalent: "")
         lint.target = self
+        let records = fileMenu.addItem(withTitle: "Rekordbox Records…", action: #selector(showRecords), keyEquivalent: "")
+        records.target = self
         fileMenu.addItem(.separator())
         fileMenu.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         file.submenu = fileMenu
@@ -362,6 +385,49 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         }
     }
 
+    @objc func showRecords() {
+        if recordsController == nil { recordsController = RecordsController(sorter: self) }
+        recordsController?.present()
+    }
+
+    var rekordboxXML: URL { URL(fileURLWithPath: (configuration.rekordboxXML as NSString).expandingTildeInPath) }
+
+    func recordGrid(_ url: URL, grid: BeatGrid, cues: [Double], duration: Double, sampleRate: Double) throws {
+        try gridStore.set(url, grid: grid, cues: cues, duration: duration, sampleRate: sampleRate)
+        exportRekordbox()
+    }
+
+    // Keeps a record on its file when the app moves or trashes it. A failure is reported
+    // after the move, never blocking it; the record then shows as missing.
+    func updateRecords(_ change: () throws -> Bool) -> String {
+        do {
+            if try change() { exportRekordbox() }
+            return ""
+        } catch { return " Rekordbox record not updated: \(error.localizedDescription)" }
+    }
+
+    // Regenerates the whole XML in the background. Changes during an export queue one more.
+    func exportRekordbox() {
+        guard !exporting else { exportPending = true; return }
+        exporting = true
+        let store = gridStore.url, output = rekordboxXML
+        exportQueue.async { [self] in
+            let result = Result { () throws -> [String: Any] in
+                let request = String(decoding: try JSONSerialization.data(withJSONObject: ["output": output.path]), as: UTF8.self)
+                return try helper("rekordbox-xml", file: store, text: request)
+            }
+            DispatchQueue.main.async { [self] in
+                exporting = false
+                exportResult = result
+                recordsController?.reload()
+                if exportPending {
+                    exportPending = false
+                    exportRekordbox()
+                }
+            }
+        }
+    }
+
     @objc func checkDestinationTags() {
         if lintController == nil { lintController = LintController(sorter: self) }
         lintController?.present()
@@ -373,8 +439,10 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         try encoder.encode(updated).write(to: configurationURL, options: .atomic)
         let sourceChanged = configuration.sourceFolder != updated.sourceFolder
+        let xmlChanged = configuration.rekordboxXML != updated.rekordboxXML
         configuration = updated
         refreshDestinations()
+        if xmlChanged { exportRekordbox() }
         if sourceChanged {
             // A configured source takes precedence over the last ad-hoc folder, even after restart.
             UserDefaults.standard.removeObject(forKey: "source")
@@ -749,8 +817,10 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
             }
             if deletingCurrent && !saveComment() { return false }
             let wasPlaying = player?.isPlaying ?? false
+            let recordKey = GridStore.key(url)
             // Do not stop playback or alter the queue until Trash succeeds.
             try sendToTrash(url)
+            let recordNote = updateRecords { try gridStore.markTrashed(recordKey) }
             files.remove(at: removedIndex)
             if deletingCurrent {
                 player?.stop()
@@ -768,7 +838,7 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
                 if files.isEmpty { clear() }
                 else { select(min(removedIndex, files.count - 1), autoplay: wasPlaying) }
             } else { highlight() }
-            status.stringValue = "Moved \(url.lastPathComponent) to Trash. Recover it in Finder; ⌘Z only undoes sorting moves."
+            status.stringValue = "Moved \(url.lastPathComponent) to Trash. Recover it in Finder; ⌘Z only undoes sorting moves.\(recordNote)"
             return true
         } catch { report(error); return false }
     }
@@ -806,8 +876,10 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
             // FileManager refuses an existing target; never overwrite or auto-rename.
             try FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
             let genre = configuration.destinations[destination].genre
+            let recordKey = GridStore.key(original)
             let restore = try moveTaggedFile(from: original, to: target, change: genre.map { ["genre": $0] })
             undoMoves.append((original, target, restore))
+            let recordNote = updateRecords { try gridStore.move(from: recordKey, to: target) }
             let oldIndex = index
             files.remove(at: oldIndex)
             index = -1
@@ -820,7 +892,7 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
             else { clear() }
             window.makeFirstResponder(table)
             let tagged = genre.map { " Genre: \($0)." } ?? ""
-            status.stringValue = "Moved to \(names[destination]).\(tagged) ⌘Z undoes move/tag.\(oldIndex >= files.count ? " End of list." : "")"
+            status.stringValue = "Moved to \(names[destination]).\(tagged) ⌘Z undoes move/tag.\(oldIndex >= files.count ? " End of list." : "")\(recordNote)"
         } catch {
             player?.currentTime = position
             if wasPlaying { player?.play() }
@@ -831,8 +903,10 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
     func undoMove() {
         guard let last = undoMoves.last, saveComment() else { return }
         do {
+            let recordKey = GridStore.key(last.to)
             _ = try moveTaggedFile(from: last.to, to: last.from, change: last.genreRestore)
             undoMoves.removeLast()
+            let recordNote = updateRecords { try gridStore.move(from: recordKey, to: last.from) }
             invalidateGenres()
             // Only add it to this queue if it belongs to the current source scope.
             if let source, last.from.deletingLastPathComponent() == source || (recursive.state == .on && last.from.path.hasPrefix(source.path + "/")) {
@@ -846,7 +920,7 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
                 if index < 0, let restored = files.firstIndex(of: last.from) { select(restored, autoplay: false) }
                 else { highlight() }
             }
-            status.stringValue = "Restored \(last.from.lastPathComponent). Comment edits are not undone."
+            status.stringValue = "Restored \(last.from.lastPathComponent). Comment edits are not undone.\(recordNote)"
         } catch { report(error) }
     }
 
@@ -888,9 +962,9 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
     func askToDiscard(_ unsaved: [URL]) -> Bool {
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = unsaved.count == 1 ? "Quit without saving your bar edit?" : "Quit without saving \(unsaved.count) bar edits?"
+        alert.messageText = unsaved.count == 1 ? "Quit without saving your bar edit or cues?" : "Quit without saving bar edits or cues on \(unsaved.count) tracks?"
         alert.informativeText = unsaved.map(\.lastPathComponent).joined(separator: "\n")
-            + "\n\nUnsaved edits only last while the app is open. To keep one, cancel, select the track, press B, then ⌘S."
+            + "\n\nUnsaved edits and cues only last while the app is open. To keep them, cancel, select the track, press B, then ⌘S to save the edit, or ⌘⇧S to record the grid and cues."
         alert.addButton(withTitle: "Cancel").keyEquivalent = "\r"
         let quit = alert.addButton(withTitle: "Quit Anyway")
         quit.keyEquivalent = ""
@@ -1323,6 +1397,171 @@ final class LintController: NSWindowController, NSTableViewDataSource, NSTableVi
     }
 }
 
+// Every recorded grid, with files that went missing (renamed or deleted outside the app)
+// or to Trash flagged rather than dropped. Only current files are in the XML.
+final class RecordsController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate {
+    unowned let sorter: Sorter
+    let summary = NSTextField(wrappingLabelWithString: "")
+    let table = NSTableView()
+    let revealButton = NSButton(title: "Show in Finder", target: nil, action: nil)
+    let forgetButton = NSButton(title: "Forget selected…", target: nil, action: nil)
+    var keys: [String] = []
+
+    init(sorter: Sorter) {
+        self.sorter = sorter
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 480), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        super.init(window: window)
+        window.title = "Rekordbox Records"
+        window.minSize = NSSize(width: 640, height: 320)
+        window.isReleasedWhenClosed = false
+        let content = NSStackView()
+        content.orientation = .vertical
+        content.alignment = .leading
+        content.spacing = 12
+        content.translatesAutoresizingMaskIntoConstraints = false
+        window.contentView!.addSubview(content)
+        NSLayoutConstraint.activate([
+            content.leadingAnchor.constraint(equalTo: window.contentView!.leadingAnchor, constant: 20),
+            content.trailingAnchor.constraint(equalTo: window.contentView!.trailingAnchor, constant: -20),
+            content.topAnchor.constraint(equalTo: window.contentView!.topAnchor, constant: 20),
+            content.bottomAnchor.constraint(equalTo: window.contentView!.bottomAnchor, constant: -20)
+        ])
+        content.addArrangedSubview(summary)
+        for (identifier, heading, width) in [("status", "Status", 90.0), ("file", "File", 560.0), ("bpm", "BPM", 70.0), ("cues", "Cues", 50.0)] {
+            let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(identifier))
+            column.title = heading
+            column.width = width
+            table.addTableColumn(column)
+        }
+        table.delegate = self
+        table.dataSource = self
+        table.rowHeight = 24
+        table.allowsMultipleSelection = true
+        let scroll = NSScrollView()
+        scroll.documentView = table
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
+        content.addArrangedSubview(scroll)
+        scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 150).isActive = true
+        revealButton.target = self
+        revealButton.action = #selector(reveal)
+        forgetButton.target = self
+        forgetButton.action = #selector(confirmForget)
+        let actions = NSStackView(views: [NSButton(title: "Export now", target: self, action: #selector(export)), revealButton,
+                                          NSButton(title: "Show XML in Finder", target: self, action: #selector(revealXML)), forgetButton])
+        actions.spacing = 12
+        content.addArrangedSubview(actions)
+        for view in [summary, scroll] { view.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true }
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func present() {
+        if window?.isVisible != true { window?.center() }
+        reload()
+        showWindow(nil)
+        window?.makeKeyAndOrderFront(nil)
+    }
+
+    func statusText(_ key: String) -> String {
+        switch sorter.gridStore.status(key) {
+        case .current: return "OK"
+        case .missing: return "Missing"
+        case .trashed: return "In Trash"
+        }
+    }
+
+    // Problems first, so a renamed file is the first thing you see.
+    func reload() {
+        let store = sorter.gridStore
+        keys = store.contents.tracks.keys.sorted { a, b in
+            let (x, y) = (store.status(a) == .current, store.status(b) == .current)
+            return x != y ? !x : a.localizedStandardCompare(b) == .orderedAscending
+        }
+        table.reloadData()
+        let missing = keys.filter { store.status($0) != .current }.count
+        var lines = ["\(keys.count) recorded track\(keys.count == 1 ? "" : "s") → \(sorter.rekordboxXML.path)"]
+        if let error = store.loadError { lines.append(error) }
+        if missing > 0 { lines.append("\(missing) point\(missing == 1 ? "s" : "") to a missing or trashed file and \(missing == 1 ? "is" : "are") left out of the XML. Put the file back, or forget the record.") }
+        switch sorter.exportResult {
+        case .success(let report):
+            let failed = (report["failed"] as? [[String: Any]] ?? []).map { "\(($0["path"] as? String).map { URL(fileURLWithPath: $0).lastPathComponent } ?? "?"): \($0["error"] ?? "")" }
+            lines.append("Last export: \(report["tracks"] ?? 0) track(s) written." + (failed.isEmpty ? "" : " Not exported: " + failed.joined(separator: "; ")))
+        case .failure(let error): lines.append("Last export failed: \(error.localizedDescription)")
+        case nil: break
+        }
+        if sorter.exporting { lines.append("Exporting…") }
+        summary.stringValue = lines.joined(separator: "\n")
+        updateButtons()
+    }
+
+    func updateButtons() {
+        let selected = table.selectedRowIndexes.filter { keys.indices.contains($0) }
+        revealButton.isEnabled = selected.count == 1 && sorter.gridStore.status(keys[selected.first!]) == .current
+        forgetButton.isEnabled = !selected.isEmpty
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int { keys.count }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        guard keys.indices.contains(row), let record = sorter.gridStore.contents.tracks[keys[row]] else { return nil }
+        let text: String
+        switch tableColumn?.identifier.rawValue {
+        case "status": text = statusText(keys[row])
+        case "bpm": text = String(format: "%.2f", record.bpm)
+        case "cues": text = "\(record.cues.count)"
+        default: text = keys[row]
+        }
+        let label = NSTextField(labelWithString: text)
+        label.lineBreakMode = .byTruncatingMiddle
+        if tableColumn?.identifier.rawValue == "status", text != "OK" { label.textColor = .systemRed }
+        return label
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) { updateButtons() }
+
+    @objc func export() { sorter.exportRekordbox(); reload() }
+
+    @objc func reveal() {
+        guard let row = table.selectedRowIndexes.first, keys.indices.contains(row) else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: keys[row])])
+    }
+
+    @objc func revealXML() {
+        let xml = sorter.rekordboxXML
+        if FileManager.default.fileExists(atPath: xml.path) { NSWorkspace.shared.activateFileViewerSelecting([xml]) }
+        else { summary.stringValue += "\n\(xml.path) has not been written yet." }
+    }
+
+    @objc func confirmForget() {
+        let selected = table.selectedRowIndexes.filter { keys.indices.contains($0) }.map { keys[$0] }
+        guard !selected.isEmpty, let window else { return }
+        let alert = NSAlert()
+        alert.messageText = selected.count == 1 ? "Forget this recorded grid?" : "Forget \(selected.count) recorded grids?"
+        alert.informativeText = selected.map { URL(fileURLWithPath: $0).lastPathComponent }.joined(separator: "\n")
+            + "\n\nTheir grids and cues leave the store and the XML. Audio files are not touched, and tracks already imported into Rekordbox keep what they have."
+        alert.addButton(withTitle: "Cancel").keyEquivalent = "\r"
+        let confirm = alert.addButton(withTitle: "Forget")
+        confirm.keyEquivalent = ""
+        confirm.hasDestructiveAction = true
+        alert.beginSheetModal(for: window) { [self] response in
+            guard response == .alertSecondButtonReturn else { return }
+            forget(selected)
+        }
+    }
+
+    func forget(_ selected: [String]) {
+        do {
+            try sorter.gridStore.forget(selected)
+            sorter.exportRekordbox()
+        } catch {
+            summary.stringValue += "\nNot forgotten: \(error.localizedDescription)"
+            return
+        }
+        reload()
+    }
+}
+
 final class SettingsController: NSWindowController {
     unowned let sorter: Sorter
     let sourceField = NSTextField(string: "")
@@ -1331,6 +1570,7 @@ final class SettingsController: NSWindowController {
     let add = NSButton(title: "Add destination", target: nil, action: nil)
     let preview = NSButton(checkboxWithTitle: "Start newly loaded tracks at 30%", target: nil, action: nil)
     let suffixField = NSTextField(string: "")
+    let xmlField = NSTextField(string: "")
 
     init(sorter: Sorter) {
         self.sorter = sorter
@@ -1377,6 +1617,12 @@ final class SettingsController: NSWindowController {
         suffixRow.spacing = 4
         suffixField.widthAnchor.constraint(equalToConstant: 140).isActive = true
         content.addArrangedSubview(suffixRow)
+        content.addArrangedSubview(NSTextField(labelWithString: "Rekordbox XML (recorded grids and memory cues)"))
+        xmlField.placeholderString = "~/Music/Audio Sorter/rekordbox.xml"
+        let xmlRow = NSStackView(views: [xmlField, NSButton(title: "Choose…", target: self, action: #selector(browseXML))])
+        xmlRow.spacing = 8
+        content.addArrangedSubview(xmlRow)
+        xmlRow.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
         let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancelSettings))
         cancel.keyEquivalent = "\u{1b}"
         let save = NSButton(title: "Save", target: self, action: #selector(saveSettings))
@@ -1395,6 +1641,7 @@ final class SettingsController: NSWindowController {
             rootField.stringValue = sorter.configuration.destinationRoot
             preview.state = sorter.configuration.startAtThirtyPercent ? .on : .off
             suffixField.stringValue = sorter.configuration.editSuffix
+            xmlField.stringValue = sorter.configuration.rekordboxXML
             for row in rows.arrangedSubviews { rows.removeArrangedSubview(row); row.removeFromSuperview() }
             for destination in sorter.configuration.destinations { appendRow(directory: destination.directory, genre: destination.genre ?? "") }
             window?.center()
@@ -1454,6 +1701,18 @@ final class SettingsController: NSWindowController {
 
     @objc func browseSource() { browse(sourceField) }
     @objc func browseRoot() { browse(rootField) }
+
+    @objc func browseXML() {
+        let panel = NSSavePanel()
+        panel.canCreateDirectories = true
+        panel.allowedContentTypes = [.xml]
+        let current = URL(fileURLWithPath: (xmlField.stringValue as NSString).expandingTildeInPath)
+        panel.directoryURL = current.deletingLastPathComponent()
+        panel.nameFieldStringValue = current.lastPathComponent.isEmpty ? "rekordbox.xml" : current.lastPathComponent
+        panel.beginSheetModal(for: window!) { [self] response in
+            if response == .OK, let url = panel.url { xmlField.stringValue = url.path }
+        }
+    }
     @objc func cancelSettings() { close() }
 
     @objc func saveSettings() {
@@ -1470,13 +1729,13 @@ final class SettingsController: NSWindowController {
             let data = try JSONSerialization.data(withJSONObject: [
                 "sourceFolder": trimmed(sourceField), "destinationRoot": trimmed(rootField),
                 "destinations": destinations, "startAtThirtyPercent": preview.state == .on,
-                "editSuffix": trimmed(suffixField)
+                "editSuffix": trimmed(suffixField), "rekordboxXML": trimmed(xmlField)
             ])
             let updated = try JSONDecoder().decode(Configuration.self, from: data)
-            for path in [updated.sourceFolder, updated.destinationRoot] {
+            for path in [updated.sourceFolder, updated.destinationRoot, updated.rekordboxXML] {
                 let expanded = (path as NSString).expandingTildeInPath
                 guard (expanded as NSString).isAbsolutePath else {
-                    throw NSError(domain: "AudioSorter", code: 5, userInfo: [NSLocalizedDescriptionKey: "Choose an absolute directory path or a path starting with ~/."])
+                    throw NSError(domain: "AudioSorter", code: 5, userInfo: [NSLocalizedDescriptionKey: "Choose an absolute path or a path starting with ~/."])
                 }
             }
             let values = try Configuration.expand(updated.sourceFolder).resourceValues(forKeys: [.isDirectoryKey, .isReadableKey])
@@ -1492,6 +1751,106 @@ final class SettingsController: NSWindowController {
             } else { alert.informativeText = error.localizedDescription }
             alert.beginSheetModal(for: window!)
         }
+    }
+}
+
+// MARK: - Rekordbox records
+
+// A grid and memory cues recorded for one file, in seconds as AVFoundation decodes it
+// (the editor's timeline). rekordbox.py turns these into the rekordbox XML.
+struct GridRecord: Codable, Equatable {
+    var bpm: Double
+    var anchor: Double  // Any downbeat.
+    var cues: [Double]
+    var trackID: Int    // Stable, so Rekordbox sees the same TrackID on every export.
+    var duration: Double
+    var sampleRate: Double
+    // Set when the app moved the file to Trash; Finder's Put Back makes the record current again.
+    var trashed: Bool?
+}
+
+// The persistent store: a small JSON file keyed by absolute path, replaced atomically.
+// Tag writes never change the audio timeline, so they leave records valid; moves, move
+// undo and Trash update the keys. Records are never dropped silently: a file renamed or
+// deleted outside the app shows as missing in the Records window until you forget it.
+final class GridStore {
+    struct Contents: Codable {
+        var version = 1
+        var nextTrackID = 1
+        var tracks: [String: GridRecord] = [:]
+    }
+    enum Status { case current, missing, trashed }
+
+    let url: URL
+    private(set) var contents = Contents()
+    // A store that cannot be read is never overwritten, so its records survive for repair.
+    private(set) var loadError: String?
+
+    static var defaultURL: URL {
+        // Tests point this at a temporary folder; the app always uses Application Support.
+        let support = ProcessInfo.processInfo.environment["AUDIO_SORTER_SUPPORT"].map { URL(fileURLWithPath: $0, isDirectory: true) }
+            ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Audio Sorter", isDirectory: true)
+        return support.appendingPathComponent("grids.json")
+    }
+
+    init(url: URL) {
+        self.url = url
+        guard let data = try? Data(contentsOf: url) else { return }
+        do { contents = try JSONDecoder().decode(Contents.self, from: data) }
+        catch { loadError = "Cannot read \(url.path): \(error.localizedDescription)" }
+    }
+
+    // Folder listings can spell a path through a symlink (/var vs /private/var) or with accents
+    // decomposed (é as e + ◌́); APFS treats those as the same file, and so do keys.
+    static func key(_ url: URL) -> String { url.resolvingSymlinksInPath().path.precomposedStringWithCanonicalMapping }
+
+    func record(for url: URL) -> GridRecord? { contents.tracks[Self.key(url)] }
+
+    func status(_ key: String) -> Status {
+        if FileManager.default.fileExists(atPath: key) { return .current }
+        return contents.tracks[key]?.trashed == true ? .trashed : .missing
+    }
+
+    private func commit(_ change: (inout Contents) -> Void) throws {
+        if let loadError { throw EditError(loadError + " Fix or remove that file, then try again.") }
+        var updated = contents
+        change(&updated)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        try encoder.encode(updated).write(to: url, options: .atomic)
+        contents = updated
+    }
+
+    func set(_ url: URL, grid: BeatGrid, cues: [Double], duration: Double, sampleRate: Double) throws {
+        let key = Self.key(url)
+        try commit { contents in
+            let id = contents.tracks[key]?.trackID ?? contents.nextTrackID
+            contents.nextTrackID = max(contents.nextTrackID, id + 1)
+            contents.tracks[key] = GridRecord(bpm: grid.bpm, anchor: grid.anchor, cues: cues.sorted(), trackID: id, duration: duration, sampleRate: sampleRate)
+        }
+    }
+
+    // Returns whether a record changed, so callers only regenerate the XML when needed.
+    @discardableResult func move(from old: String, to new: URL) throws -> Bool {
+        guard contents.tracks[old] != nil else { return false }
+        let key = Self.key(new)
+        try commit { contents in
+            var record = contents.tracks.removeValue(forKey: old)!
+            record.trashed = nil
+            contents.tracks[key] = record
+        }
+        return true
+    }
+
+    @discardableResult func markTrashed(_ key: String) throws -> Bool {
+        guard contents.tracks[key] != nil else { return false }
+        try commit { $0.tracks[key]?.trashed = true }
+        return true
+    }
+
+    func forget(_ keys: [String]) throws {
+        try commit { contents in for key in keys { contents.tracks[key] = nil } }
     }
 }
 
@@ -1752,6 +2111,16 @@ struct EditTimeline {
             position += taken
         }
         return result
+    }
+
+    // The source time an edited-track time plays, if that audio appears exactly once in the
+    // edit. Audio that was duplicated has no single place on the original.
+    func uniqueSourceTime(_ time: Double) -> Double? {
+        let frame = Int64((time * rate).rounded())
+        guard let span = spans.first(where: { frame >= $0.output && frame < $0.output + $0.count }) else { return nil }
+        let source = span.source + frame - span.output
+        guard spans.filter({ source >= $0.source && source < $0.source + $0.count }).count == 1 else { return nil }
+        return time + Double(span.source - span.output) / rate
     }
 
     // Output frames where playback jumps to a different part of the source.
@@ -2319,6 +2688,7 @@ final class EditorController: NSWindowController, NSWindowDelegate {
     let clickButton = NSButton(checkboxWithTitle: "Click  M", target: nil, action: nil)
     let writeBPMButton = NSButton(title: "Write BPM to tag", target: nil, action: nil)
     let cueLabel = NSTextField(labelWithString: "")
+    let recordButton = NSButton(title: "Save grid & cues  ⌘⇧S", target: nil, action: nil)
     // The original file's BPM tag, so writing it is only offered when it would change.
     var taggedBPM: Double?
     let metronome = Metronome()
@@ -2400,9 +2770,11 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         let editRow = NSStackView(views: [cutButton, duplicateButton, undoButton, redoButton, editLabel, saveButton])
         editRow.spacing = 8
         content.addArrangedSubview(editRow)
+        recordButton.target = self
+        recordButton.action = #selector(saveGridAndCues)
         let cueRow = NSStackView(views: [
             button("Memory cue  C", #selector(addCue)), button("Remove nearest  ⇧C", #selector(removeCue)),
-            button("◀ Cue  [", #selector(previousCue)), button("Cue ▶  ]", #selector(nextCue)), cueLabel
+            button("◀ Cue  [", #selector(previousCue)), button("Cue ▶  ]", #selector(nextCue)), cueLabel, recordButton
         ])
         cueRow.spacing = 8
         content.addArrangedSubview(cueRow)
@@ -2456,6 +2828,13 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         if let remembered = sorter.editSessions[url] {
             session = remembered
             status.stringValue = remembered.edited ? "Restored this track's grid and edits." : "Restored this track's grid."
+        }
+        else if let record = sorter.gridStore.record(for: url) {
+            session = EditSession(grid: BeatGrid(bpm: record.bpm, anchor: record.anchor))
+            session.downbeatSet = true
+            session.cues = record.cues.map { ($0 - record.anchor) / session.grid.beatDuration }
+            session.savedCues = session.cues
+            status.stringValue = "Restored the grid and \(record.cues.count) memory cue\(record.cues.count == 1 ? "" : "s") recorded for Rekordbox."
         }
         else {
             session = EditSession(grid: BeatGrid(bpm: tagged ?? 120, anchor: 0))
@@ -2546,6 +2925,10 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         waveform.cues = cues
         overview.cues = cues
         cueLabel.stringValue = "\(cues.count)/\(EditSession.cueLimit) memory cues"
+        recordButton.isEnabled = session.downbeatSet && !saving
+        recordButton.toolTip = session.downbeatSet
+            ? "Record this file's grid and memory cues for the Rekordbox XML. The audio file is not changed."
+            : "Set the downbeat (D) first: Rekordbox's bar 1 comes from it."
         window?.isDocumentEdited = session.unsaved
         saveButton.isEnabled = session.edited && !saving
         writeBPMButton.isEnabled = taggedBPM != tagBPM && !saving
@@ -2602,7 +2985,7 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
         if flags.contains(.command) {
             switch key {
-            case "s": save(); return true
+            case "s": flags.contains(.shift) ? saveGridAndCues() : save(); return true
             case "d": duplicateSelection(); return true
             case "z": flags.contains(.shift) ? redoEdit() : undoEdit(); return true
             default: return false
@@ -2942,6 +3325,8 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         let request: [String: Any] = ["segments": timeline.segments, "fade": Int((rate * 0.005).rounded()), "output": output.path, "bpm": bpm]
         let mp3 = url.pathExtension.lowercased() == "mp3"
         let pieces = session.pieces
+        // The edit's own grid and cues, recorded once the file is verified.
+        let placed = session.downbeatSet, cueBeats = session.cues, cueTimes = session.cueTimes(duration)
         saving = true
         refresh()
         status.stringValue = mp3 ? "Saving… decoding and re-encoding the MP3." : "Saving…"
@@ -2975,7 +3360,17 @@ final class EditorController: NSWindowController, NSWindowDelegate {
                     if self.url == url { session.savedPieces = pieces } else { sorter.editSessions[url]?.savedPieces = pieces }
                     let dropped = report["dropped"] as? [String] ?? []
                     let note = dropped.isEmpty ? "" : " Removed timeline-specific metadata that no longer lines up: \(dropped.joined(separator: ", "))."
-                    status.stringValue = "Saved \(output.lastPathComponent) (\(stamp(timeline.duration)), BPM \(format(bpm)) tagged). The original is unchanged.\(note)"
+                    var recorded = " Not recorded for Rekordbox: the downbeat was not set. Open the edit, set it (D), then ⌘⇧S."
+                    if placed {
+                        do {
+                            try sorter.recordGrid(output, grid: timeline.grid, cues: cueTimes, duration: timeline.duration, sampleRate: timeline.rate)
+                            if self.url == url { session.savedCues = cueBeats } else { sorter.editSessions[url]?.savedCues = cueBeats }
+                            recorded = " Recorded its grid and \(cueTimes.count) memory cue\(cueTimes.count == 1 ? "" : "s") for Rekordbox."
+                        } catch {
+                            recorded = " Not recorded for Rekordbox: \(error.localizedDescription)"
+                        }
+                    }
+                    status.stringValue = "Saved \(output.lastPathComponent) (\(stamp(timeline.duration)), BPM \(format(bpm)) tagged). The original is unchanged.\(note)\(recorded)"
                     sorter.editSaved(output)
                 case .failure(let error):
                     status.stringValue = "Not saved: \(error.localizedDescription)"
@@ -2983,6 +3378,35 @@ final class EditorController: NSWindowController, NSWindowDelegate {
                 }
             }
         }
+    }
+
+    // Records the original's grid, with cues mapped back to where they play in it. The audio
+    // file is not touched: the record lives in the app's store and the rekordbox XML.
+    @objc func saveGridAndCues() {
+        guard let url, !saving else { return }
+        guard session.downbeatSet else {
+            status.stringValue = "Set the downbeat (D) first: Rekordbox's bar 1 comes from it."
+            NSSound.beep()
+            return
+        }
+        let timeline = timeline
+        let mapped = session.cueTimes(duration).map { timeline.uniqueSourceTime($0) }
+        let cues = mapped.compactMap { $0 }, dropped = mapped.count - cues.count
+        do {
+            try sorter.recordGrid(url, grid: session.grid, cues: cues, duration: duration, sampleRate: rate)
+        } catch {
+            status.stringValue = "Not recorded: \(error.localizedDescription)"
+            NSSound.beep()
+            return
+        }
+        session.savedCues = session.cues
+        refresh()
+        let grid = session.grid
+        var message = "Recorded \(url.lastPathComponent) for Rekordbox: BPM \(format(grid.bpm)), bar 1 at \(stamp(grid.barTime(grid.firstBar))), \(cues.count) memory cue\(cues.count == 1 ? "" : "s"). The audio file is unchanged."
+        if dropped > 0 {
+            message += " Left out \(dropped) cue\(dropped == 1 ? "" : "s") in duplicated audio, which has no single place in the original; save the edit (⌘S) to keep \(dropped == 1 ? "it" : "them")."
+        }
+        status.stringValue = message
     }
 
     func windowWillClose(_ notification: Notification) {
