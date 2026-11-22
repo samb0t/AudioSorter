@@ -16,7 +16,7 @@ iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AudioSorter.icns"
 if [ ! -f "$ROOT/config.json" ]; then
   cp "$ROOT/config.example.json" "$ROOT/config.json"
 fi
-cp "$ROOT/comments.py" "$APP/Contents/Resources/comments.py"
+cp "$ROOT/comments.py" "$ROOT/edit.py" "$APP/Contents/Resources/"
 printf '%s' "$ROOT/.venv/bin/python" > "$APP/Contents/Resources/python-path"
 printf '%s' "$ROOT/config.json" > "$APP/Contents/Resources/config-path"
 cat > "$APP/Contents/Info.plist" <<'PLIST'
@@ -33,6 +33,6 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>NSPrincipalClass</key><string>NSApplication</string>
 </dict></plist>
 PLIST
-swiftc "$ROOT/main.swift" -o "$APP/Contents/MacOS/AudioSorter" -framework Cocoa -framework AVFoundation
+swiftc -O "$ROOT/main.swift" -o "$APP/Contents/MacOS/AudioSorter" -framework Cocoa -framework AVFoundation
 codesign --force --sign - "$APP"
 echo "Built $APP"

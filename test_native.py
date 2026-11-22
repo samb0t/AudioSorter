@@ -970,3 +970,200 @@ assert(mover.calls == calls)
             script.write_text("import Foundation\nstruct Destination:" + configuration + harness)
             result = subprocess.run(["swift", str(script), directory], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_bar_edit_model_cut_duplicate_undo_and_regrid(self):
+        source = Path(__file__).with_name("main.swift").read_text().split("let app = NSApplication.shared", 1)[0]
+        harness = r'''
+// 120 BPM: two-second bars, first downbeat at 0.5 s, 21-second track.
+let duration = 21.0
+var session = EditSession(grid: BeatGrid(bpm: 120, anchor: 0.5))
+assert(session.grid.firstBar == 0 && session.grid.number(0) == 1)
+assert(BeatGrid(bpm: 120, anchor: -0.5).firstBar == 1)
+do { try session.edit(duplicate: false, duration: duration); fatalError("Expected missing selection") } catch {}
+// Cut bars 3–5 (output bars 2..<5).
+session.selection = 2
+session.bars = 3
+assert(session.selectionDescription(duration) == "bars 3–5")
+try session.edit(duplicate: false, duration: duration)
+assert(session.pieces == [Piece(from: .start, to: .bar(2)), Piece(from: .bar(5), to: .end)])
+assert(abs(session.outputDuration(duration) - 15) < 1e-9)
+assert(session.selection == 2 && session.undo.count == 1)
+// Duplicate bars 2–3 of the edited track; the copy follows and becomes the selection.
+session.selection = 1
+session.bars = 2
+try session.edit(duplicate: true, duration: duration)
+assert(session.pieces == [Piece(from: .start, to: .bar(2)), Piece(from: .bar(5), to: .bar(6)), Piece(from: .bar(1), to: .bar(2)), Piece(from: .bar(5), to: .end)])
+assert(session.selection == 3 && abs(session.outputDuration(duration) - 19) < 1e-9)
+// Frames at 1 kHz: where each part of the edited track comes from.
+let timeline = EditTimeline(session: session, rate: 1000, frames: 21_000)
+assert(timeline.length == 19_000)
+assert(timeline.segments == [[0, 4500], [10_500, 12_500], [2500, 4500], [10_500, 21_000]])
+assert(timeline.junctions == [4500, 6500, 8500])
+let ranges = timeline.ranges(from: 4000, count: 1000)
+assert(ranges.count == 2 && ranges[0] == (4000, 500) && ranges[1] == (10_500, 500))
+assert(timeline.ranges(from: 18_990, count: 100).map(\.count) == [10])
+// Out-of-range selections are refused without changing anything.
+let before = session.pieces
+session.selection = 9
+do { try session.edit(duplicate: true, duration: duration); fatalError("Expected end-of-track error") } catch {}
+session.selection = -1
+do { try session.edit(duplicate: false, duration: duration); fatalError("Expected pickup error") } catch {}
+assert(session.pieces == before && session.undo.count == 2)
+// Moving the downbeat by whole bars renumbers bounds; the audio they point at is unchanged.
+session.regrid(BeatGrid(bpm: 120, anchor: 2.5))
+assert(session.pieces == [Piece(from: .start, to: .bar(1)), Piece(from: .bar(4), to: .bar(5)), Piece(from: .bar(0), to: .bar(1)), Piece(from: .bar(4), to: .end)])
+assert(EditTimeline(session: session, rate: 1000, frames: 21_000).segments == timeline.segments)
+assert(session.undo[0] == [Piece(from: .start, to: .end)] && session.undo[1] == [Piece(from: .start, to: .bar(1)), Piece(from: .bar(4), to: .end)])
+// Cutting from the very first downbeat starts the edit on a bar line.
+var intro = EditSession(grid: BeatGrid(bpm: 120, anchor: 0))
+intro.selection = 0
+intro.bars = 1
+try intro.edit(duplicate: false, duration: duration)
+assert(intro.pieces == [Piece(from: .bar(1), to: .end)] && intro.outputGrid(duration).anchor == 0)
+// Cutting everything that remains between two bars and re-joining merges contiguous pieces.
+var merge = EditSession(grid: BeatGrid(bpm: 120, anchor: 0.5))
+merge.selection = 2
+merge.bars = 2
+try merge.edit(duplicate: true, duration: duration)
+merge.selection = 4
+try merge.edit(duplicate: false, duration: duration)
+assert(merge.pieces == EditSession.untouched && !merge.edited)
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            script = Path(directory) / "main.swift"
+            script.write_text(source + harness)
+            result = subprocess.run(["swift", str(script)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg unavailable")
+    def test_editor_peaks_decoding_and_saving_end_to_end(self):
+        import math
+        import struct
+        import wave
+        source = Path(__file__).with_name("main.swift").read_text().split("let app = NSApplication.shared", 1)[0]
+        source = source.replace("final class Sorter:", "class Sorter:")
+        harness = r'''
+// The real Python helper, run from the repository rather than the app bundle.
+class TestSorter: Sorter {
+    var refreshed = 0
+    override func helper(_ action: String, file: URL, text: String? = nil) throws -> [String: Any] {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: CommandLine.arguments[2])
+        process.arguments = [CommandLine.arguments[3], action, file.path]
+        let output = Pipe(), input = Pipe()
+        process.standardOutput = output
+        process.standardInput = input
+        try process.run()
+        if let text { try input.fileHandleForWriting.write(contentsOf: Data(text.utf8)) }
+        try input.fileHandleForWriting.close()
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        let result = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+        if process.terminationStatus != 0 { throw NSError(domain: "test", code: 1, userInfo: [NSLocalizedDescriptionKey: result["error"] as? String ?? "helper failed"]) }
+        return result
+    }
+    override func refreshFolder() { refreshed += 1 }
+    override func report(_ error: Error) { fatalError("Unexpected error: \(error)") }
+}
+let app = NSApplication.shared
+let root = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
+let sorter = TestSorter()
+sorter.configuration = try JSONDecoder().decode(Configuration.self, from: Data("{\"destinationRoot\":\"/unused\",\"destinations\":[\"A\"],\"editSuffix\":\"SamEdit\"}".utf8))
+assert(sorter.editURL(for: root.appendingPathComponent("a.b.mp3")).lastPathComponent == "a.b - SamEdit.mp3")
+sorter.source = root
+
+// Peaks: every resolution agrees with the loudness layout of the fixture.
+let wav = root.appendingPathComponent("loop.wav")
+let peaks = waveformPeaks(wav)!
+assert(peaks.minimum.count >= 3 && peaks.minimum[0].count == (264_600 + 31) / 32)
+let loud = peaks.extremes(from: 0, to: 88_200)!, quiet = peaks.extremes(from: 90_000, to: 170_000)!
+assert(loud.1 > 0.8 && loud.0 < -0.8 && quiet.1 < 0.1, "\(loud) \(quiet)")
+assert(peaks.extremes(from: 10, to: 10) == nil && waveformPeaks(wav, cancelled: { true }) == nil)
+
+// MP3 decoding for edits yields exactly the frames AVFoundation plays and draws.
+let mp3 = root.appendingPathComponent("loop.mp3")
+let decoded = root.appendingPathComponent("decoded.wav")
+try decodeToWAV(mp3, to: decoded)
+let reference = try AVAudioFile(forReading: mp3), copy = try AVAudioFile(forReading: decoded)
+assert(copy.length == reference.length && copy.processingFormat.sampleRate == reference.processingFormat.sampleRate)
+try FileManager.default.removeItem(at: decoded)
+
+let editor = EditorController(sorter: sorter)
+func settle(_ condition: () -> Bool) {
+    let deadline = Date().addingTimeInterval(60)
+    while !condition() && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+    assert(condition(), "timed out")
+}
+for (name, bpm) in [("loop.wav", 120.0), ("loop.mp3", 120.0), ("loop.aiff", 120.0)] {
+    let url = root.appendingPathComponent(name)
+    editor.open(url)
+    assert(editor.session.grid.bpm == bpm && editor.bpmField.stringValue == "120")
+    settle { editor.waveform.peaks != nil }
+    assert(!editor.saveButton.isEnabled)
+    // Arrow keys snap to the next grid line: bars are 2 s, beats 0.5 s.
+    editor.playhead = 2.1
+    editor.step(1, bars: true)
+    assert(abs(editor.playhead - 4) < 1e-9)
+    editor.step(-1, bars: false)
+    assert(abs(editor.playhead - 3.5) < 1e-9)
+    editor.step(-1, bars: true)
+    assert(abs(editor.playhead - 2) < 1e-9)
+    // 6 s at 120 BPM is three bars: loud, quiet, loud. Cut the quiet bar, then repeat the last.
+    editor.playhead = 2.1
+    editor.setSelectionStart()
+    editor.session.bars = 1
+    editor.cutSelection()
+    assert(editor.session.edited && editor.saveButton.isEnabled && editor.timeline.junctions == [88_200])
+    editor.playhead = 2.2
+    editor.setSelectionStart()
+    assert(editor.session.selection == 1)
+    editor.duplicateSelection()
+    assert(editor.session.selection == 2 && editor.timeline.length == 264_600)
+    editor.undoEdit()
+    assert(editor.timeline.length == 176_400 && editor.redoButton.isEnabled)
+    editor.redoEdit()
+    editor.save()
+    settle { !editor.saving }
+    let output = root.appendingPathComponent((name as NSString).deletingPathExtension + " - SamEdit." + (name as NSString).pathExtension)
+    assert(editor.status.stringValue.hasPrefix("Saved"), editor.status.stringValue)
+    let saved = try AVAudioFile(forReading: output)
+    assert(saved.length == 264_600, "\(name): \(saved.length)")
+    // The repeated bar is loud audio, not the cut quiet bar.
+    let edited = waveformPeaks(output)!
+    assert(edited.extremes(from: 180_000, to: 260_000)!.1 > 0.8)
+    // Saving again never overwrites the edit.
+    editor.save()
+    assert(!editor.saving && editor.status.stringValue.contains("already exists"))
+    // The session is remembered when the editor moves on or closes.
+    editor.session.bars = 1
+}
+assert(sorter.refreshed == 3)
+editor.window?.close()
+assert(sorter.editSessions.count == 3 && sorter.editSessions[root.appendingPathComponent("loop.wav")]?.edited == true)
+editor.open(root.appendingPathComponent("loop.wav"))
+assert(editor.session.edited && editor.timeline.length == 264_600)
+editor.window?.close()
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rate = 44100
+            frames = bytearray()
+            for i in range(rate * 6):
+                amplitude = 0.05 if rate * 2 <= i < rate * 4 else 0.9
+                sample = int(32767 * amplitude * math.sin(2 * math.pi * 220 * i / rate))
+                frames += struct.pack("<hh", sample, sample)
+            with wave.open(str(root / "loop.wav"), "wb") as output:
+                output.setnchannels(2)
+                output.setsampwidth(2)
+                output.setframerate(rate)
+                output.writeframes(bytes(frames))
+            subprocess.run(["ffmpeg", "-v", "error", "-i", str(root / "loop.wav"), "-c:a", "libmp3lame", "-b:a", "320k",
+                            "-metadata", "TBPM=120", str(root / "loop.mp3")], check=True)
+            subprocess.run(["ffmpeg", "-v", "error", "-i", str(root / "loop.wav"), "-c:a", "pcm_s16be", "-write_id3v2", "1",
+                            "-metadata", "TBPM=120", str(root / "loop.aiff")], check=True)
+            # The WAV has no BPM tag; 120 is the editor's default.
+            script = root / "main.swift"
+            script.write_text(source + harness)
+            helper = str(Path(__file__).with_name("comments.py"))
+            result = subprocess.run(["swift", str(script), directory, sys.executable, helper], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

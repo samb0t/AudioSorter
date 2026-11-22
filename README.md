@@ -53,6 +53,8 @@ You can still edit the local config manually and restart; no rebuild is needed.
   retag operation.
 - `startAtThirtyPercent`: `true` by default, including when omitted. Each newly
   loaded track is positioned 30% into its duration; `false` starts at the beginning.
+- `editSuffix`: name used for bar edits, saved as `<name> - <editSuffix>.<ext>`
+  beside the original; `Edit` when omitted. Also editable in Settings.
 
 ## Keys
 
@@ -73,6 +75,7 @@ You can still edit the local config manually and restart; no rebuild is needed.
 | J / K or ↓ / ↑ | Select next/previous, without autoplay |
 | N | Save comment and preview next, without moving |
 | E | Edit embedded comment |
+| B / ⌘B | Open the current track in **Cut Bars** (pauses playback; saves the comment first) |
 | ⌘Enter / ⌘S | Save comment and return to sorting |
 | ⌘1–⌘9 (configured destinations) | Save comment, move, and preview next, even inside the comment editor |
 | Esc, while editing | Discard unsaved comment edits |
@@ -168,6 +171,73 @@ edits. Create Rekordbox Intelligent Playlists using conditions such as `Genre eq
 House` to automatically group imported tracks. These playlists do not watch folders
 or import files automatically. Keep gig playlists as curated regular playlists.
 
+## Cut Bars
+
+**Cut Bars…** (toolbar, **B**, or **File → Cut Bars… ⌘B**) opens the current track in
+an editor for removing or repeating whole bars, the way you would in Ableton:
+
+1. **Set the grid.** The BPM comes from the file's BPM tag when present (Beatport
+   and most stores set one); otherwise type it. Zoom in on the first kick, click to
+   put the playhead on it, and press **D** to make it a downbeat. Then check bar
+   lines late in the track. If they drift off the kicks, fine-tune the BPM (decimals
+   are fine). **,** / **.** nudge the grid 1 ms (Shift: 10 ms), and ⌥-drag slides it.
+2. **Select bars.** **I** starts a selection at the bar line nearest the playhead.
+   Choose a length (8/16/32 or type one), or press **O** at its end.
+3. **Edit.** **X** (or Delete) cuts the selection; **⌘D** duplicates it right
+   after itself and selects the copy, so pressing ⌘D again keeps extending. Edits
+   stack. For example, cut a 32-bar breakdown, then select the last 16 bars and
+   duplicate them. ⌘Z / ⌘⇧Z undo and redo.
+4. **Listen.** The editor shows and plays the *edited* track; red lines mark splices.
+   **P** plays from two bars before the selection, which after a cut or duplicate is
+   right across the new splice.
+5. **Save** (**⌘S**) writes `<name> - <editSuffix>.<ext>` next to the original. The
+   original is never modified and an existing edit is never overwritten (move it to
+   Trash first). The list refreshes to show the new file.
+
+| Key (editor) | Action |
+| --- | --- |
+| Space | Play/pause |
+| Click | Place the playhead |
+| ← / → | Previous/next beat; Shift: bar |
+| Scroll / swipe | Move along the track |
+| Pinch, ⌘/⌥-scroll, = / − | Zoom (down to individual samples); 0 fits the track |
+| Overview strip | Click or drag to jump |
+| D | Downbeat at playhead |
+| , / . | Nudge grid 1 ms earlier/later; Shift: 10 ms |
+| ⌥-drag | Slide the grid |
+| I / O | Selection start/end at the nearest bar line |
+| X or Delete | Cut selection |
+| ⌘D | Duplicate selection |
+| ⌘Z / ⌘⇧Z | Undo/redo edits |
+| P | Play into the selection |
+| ⌘S | Save edit |
+| Esc | Stop (or leave the BPM/bars field without applying) |
+
+Grid, edits, and undo history are remembered per track until the app quits. Edits
+are stored as bar numbers, so tweaking the BPM or downbeat afterwards keeps them on
+the same bars. Only 4/4 at a constant tempo is supported.
+
+**How the file is written.** Every splice gets a 5 ms equal-gain crossfade, placed
+just *before* the bar line: the audio before the splice fades into the audio leading
+up to the next downbeat, so the transient on the downbeat itself is untouched and
+there is no click. Playback in the editor uses hard splices; the saved file has the
+fades.
+- **WAV/AIFF:** lossless. Sample data outside the fades is copied byte-for-byte, and
+  all other chunks (tags, artwork, `bext`, unknown chunks) are preserved. Supports
+  8/16/24/32-bit integer and 32/64-bit float PCM, including WAVE_FORMAT_EXTENSIBLE
+  and AIFC `sowt`/`fl32`; compressed formats are rejected.
+- **MP3:** re-encoded once with FFmpeg's LAME encoder (`brew install ffmpeg`), at the
+  nearest standard bitrate for CBR sources or V0 for VBR. The audio is decoded with
+  AVFoundation, which the editor also uses to draw and play, so splices land exactly
+  where they appeared. (FFmpeg's own decoder can disagree by ~500 samples on MP3s
+  without a gapless header.) The ID3 tag, including artwork and DJ frames, is copied
+  over unchanged. The output has a LAME gapless header, so its length is exact.
+- **Timeline metadata is dropped**, because it would point at the wrong places:
+  WAV `cue `/`smpl`/`acid`/`plst`/`LIST adtl`, AIFF `MARK`/`INST`, ID3 `TLEN`,
+  `MLLT`/`ETCO`/`SYTC`/`SYLT`/`ASPI`/`POSS`, Serato `GEOB` frames, and Traktor
+  `PRIV:TRAKTOR4`. The save message lists anything removed. Re-analyze the edit in
+  your DJ software.
+
 ## Check destination tags
 
 Choose **File → Check destination tags…** to lint the configured destination
@@ -247,9 +317,15 @@ verification was performed for this feature; disposable-copy checks remain requi
   Missing tags only; mismatches, conflicts, malformed/unreadable metadata, and missing
   directories remain report-only. No repair undo; move/Genre undo history is unchanged.
 
+- [x] Cut Bars editor: manual BPM/downbeat grid, zoom to sample level, cut and
+  duplicate whole bars, crossfaded splices, save as a new file.
+- [ ] Automatic BPM and downbeat detection (beat_this) to pre-fill the grid.
+- [ ] Metronome click over editor playback to check the grid by ear; tap tempo.
+- [ ] Persist grids and edits across launches.
+
 ## Tests
 
 Run `.venv/bin/python -m unittest -v`. Tests use temporary files only. FFmpeg is
-needed for real-audio packet-preservation and native playback tests; those tests
-skip if unavailable. Native tests require Swift/macOS. Trash is mocked; tests never
+needed for real-audio packet-preservation, native playback, and MP3 edit tests;
+those tests skip if unavailable. Native tests require Swift/macOS. Trash is mocked; tests never
 send files to the real Trash or modify the user's music library.

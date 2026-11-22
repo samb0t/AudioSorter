@@ -524,6 +524,12 @@ if __name__ == "__main__":
         elif action == "write-genre":
             previous = write_genre(path, json.load(sys.stdin))
             print(json.dumps({"previous": previous}))
+        elif action == "read-bpm":
+            from edit import read_bpm
+            print(json.dumps({"bpm": read_bpm(path)}))
+        elif action == "cut":
+            from edit import cut_file
+            print(json.dumps(cut_file(path, json.load(sys.stdin))))
         elif action == "lint":
             print(json.dumps(lint_destinations(path, json.load(sys.stdin)["destinations"])))
         elif action in ("repair-missing-genres", "repair-genres", "recheck-genres"):

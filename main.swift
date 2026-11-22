@@ -28,8 +28,10 @@ struct Configuration: Codable {
     var destinationRoot: String
     var destinations: [Destination]
     var startAtThirtyPercent: Bool = true
+    // Bar edits are saved beside the original as "<name> - <editSuffix>.<ext>".
+    var editSuffix: String = "Edit"
 
-    enum CodingKeys: String, CodingKey { case sourceFolder, destinationRoot, destinations, startAtThirtyPercent }
+    enum CodingKeys: String, CodingKey { case sourceFolder, destinationRoot, destinations, startAtThirtyPercent, editSuffix }
 
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -37,6 +39,10 @@ struct Configuration: Codable {
         destinationRoot = try values.decode(String.self, forKey: .destinationRoot)
         destinations = try values.decode([Destination].self, forKey: .destinations)
         startAtThirtyPercent = try values.decodeIfPresent(Bool.self, forKey: .startAtThirtyPercent) ?? true
+        editSuffix = try values.decodeIfPresent(String.self, forKey: .editSuffix) ?? "Edit"
+        guard !editSuffix.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !editSuffix.contains("/"), !editSuffix.hasPrefix(".") else {
+            throw DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "The edit suffix must be nonempty, contain no slashes, and not start with a period."))
+        }
         let directories = destinations.map(\.directory)
         guard !sourceFolder.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !destinationRoot.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -82,6 +88,9 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
     var configurationURL: URL!
     var settingsController: SettingsController?
     var lintController: LintController?
+    var editorController: EditorController?
+    // Grids and cuts set in the editor, remembered for the session.
+    var editSessions: [URL: EditSession] = [:]
     // Main-thread gate: existing sorting/comment/undo operations are synchronous.
     // Set before launching the worker, release only after every helper has exited.
     var repairingGenres = false
@@ -127,7 +136,7 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         revealButton.target = self
         revealButton.action = #selector(showInFinder(_:))
         revealButton.isEnabled = false
-        let toolbar = NSStackView(views: [open, recursive, revealButton, button("Settings…", #selector(showSettings))])
+        let toolbar = NSStackView(views: [open, recursive, revealButton, button("Cut bars…  B", #selector(showEditor)), button("Settings…", #selector(showSettings))])
         toolbar.spacing = 18
         root.addArrangedSubview(toolbar)
         folderLabel.lineBreakMode = .byTruncatingMiddle
@@ -250,6 +259,8 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         let trash = fileMenu.addItem(withTitle: "Move to Trash…", action: #selector(confirmTrash(_:)), keyEquivalent: "\u{8}")
         trash.target = self
         fileMenu.addItem(.separator())
+        let cut = fileMenu.addItem(withTitle: "Cut Bars…", action: #selector(showEditor), keyEquivalent: "b")
+        cut.target = self
         let lint = fileMenu.addItem(withTitle: "Check destination tags…", action: #selector(checkDestinationTags), keyEquivalent: "")
         lint.target = self
         fileMenu.addItem(.separator())
@@ -277,6 +288,9 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         if menuItem.action == #selector(refreshFolder) {
             return window?.isKeyWindow == true && NSApp.modalWindow == nil && source != nil
+        }
+        if menuItem.action == #selector(showEditor) {
+            return window?.isKeyWindow == true && NSApp.modalWindow == nil && files.indices.contains(index)
         }
         guard menuItem.action == #selector(showInFinder(_:)) || menuItem.action == #selector(confirmTrash(_:)) else { return true }
         guard window?.isKeyWindow == true, NSApp.modalWindow == nil else { return false }
@@ -317,6 +331,24 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
     @objc func showSettings() {
         if settingsController == nil { settingsController = SettingsController(sorter: self) }
         settingsController?.present()
+    }
+
+    @objc func showEditor() {
+        guard files.indices.contains(index), saveComment() else { return }
+        player?.pause()
+        if editorController == nil { editorController = EditorController(sorter: self) }
+        editorController?.open(files[index])
+    }
+
+    func editURL(for url: URL) -> URL {
+        let name = url.deletingPathExtension().lastPathComponent + " - " + configuration.editSuffix
+        return url.deletingLastPathComponent().appendingPathComponent(name).appendingPathExtension(url.pathExtension)
+    }
+
+    func editSaved(_ output: URL) {
+        // Picks up the new file when it lands in the listed folder; the current track stays put.
+        if source != nil { refreshFolder() }
+        status.stringValue = "Saved edit \(output.lastPathComponent). The original is unchanged."
     }
 
     @objc func checkDestinationTags() {
@@ -392,6 +424,7 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         }
         if key == "e" { window.makeFirstResponder(comment); return true }
         if key == "n" { next(); return true }
+        if key == "b" { showEditor(); return true }
         if let number = Int(key), (1...names.count).contains(number) {
             // Ignore key repeats so holding a destination cannot move several tracks.
             if !event.isARepeat { move(number - 1) }
@@ -1255,6 +1288,7 @@ final class SettingsController: NSWindowController {
     let rows = NSStackView()
     let add = NSButton(title: "Add destination", target: nil, action: nil)
     let preview = NSButton(checkboxWithTitle: "Start newly loaded tracks at 30%", target: nil, action: nil)
+    let suffixField = NSTextField(string: "")
 
     init(sorter: Sorter) {
         self.sorter = sorter
@@ -1296,6 +1330,11 @@ final class SettingsController: NSWindowController {
         add.action = #selector(addDestination)
         content.addArrangedSubview(add)
         content.addArrangedSubview(preview)
+        suffixField.placeholderString = "Edit"
+        let suffixRow = NSStackView(views: [NSTextField(labelWithString: "Cut-bars file name:  <name> - "), suffixField, NSTextField(labelWithString: ".<ext>")])
+        suffixRow.spacing = 4
+        suffixField.widthAnchor.constraint(equalToConstant: 140).isActive = true
+        content.addArrangedSubview(suffixRow)
         let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancelSettings))
         cancel.keyEquivalent = "\u{1b}"
         let save = NSButton(title: "Save", target: self, action: #selector(saveSettings))
@@ -1313,6 +1352,7 @@ final class SettingsController: NSWindowController {
             sourceField.stringValue = sorter.configuration.sourceFolder
             rootField.stringValue = sorter.configuration.destinationRoot
             preview.state = sorter.configuration.startAtThirtyPercent ? .on : .off
+            suffixField.stringValue = sorter.configuration.editSuffix
             for row in rows.arrangedSubviews { rows.removeArrangedSubview(row); row.removeFromSuperview() }
             for destination in sorter.configuration.destinations { appendRow(directory: destination.directory, genre: destination.genre ?? "") }
             window?.center()
@@ -1387,7 +1427,8 @@ final class SettingsController: NSWindowController {
             }
             let data = try JSONSerialization.data(withJSONObject: [
                 "sourceFolder": trimmed(sourceField), "destinationRoot": trimmed(rootField),
-                "destinations": destinations, "startAtThirtyPercent": preview.state == .on
+                "destinations": destinations, "startAtThirtyPercent": preview.state == .on,
+                "editSuffix": trimmed(suffixField)
             ])
             let updated = try JSONDecoder().decode(Configuration.self, from: data)
             for path in [updated.sourceFolder, updated.destinationRoot] {
@@ -1409,6 +1450,1134 @@ final class SettingsController: NSWindowController {
             } else { alert.informativeText = error.localizedDescription }
             alert.beginSheetModal(for: window!)
         }
+    }
+}
+
+// MARK: - Bar editor
+
+// Constant-tempo 4/4 grid. Bar k's downbeat is at anchor + k bars (seconds); k may be negative.
+struct BeatGrid: Equatable {
+    var bpm: Double
+    var anchor: Double
+    var barDuration: Double { 240 / bpm }
+    var beatDuration: Double { 60 / bpm }
+    func barTime(_ bar: Int) -> Double { anchor + Double(bar) * barDuration }
+    func nearestBar(to time: Double) -> Int { Int(((time - anchor) / barDuration).rounded()) }
+    // Bars are numbered from 1 at the first downbeat at or after time zero.
+    var firstBar: Int { Int(((-anchor) / barDuration - 1e-9).rounded(.up)) }
+    func number(_ bar: Int) -> Int { bar - firstBar + 1 }
+}
+
+// The edited track is a sequence of source pieces. Bounds are bar numbers rather than
+// frames, so tempo and downbeat adjustments carry existing edits along with the grid.
+enum Bound: Equatable { case start, bar(Int), end }
+struct Piece: Equatable { var from: Bound; var to: Bound }
+
+struct EditSession {
+    static let untouched = [Piece(from: .start, to: .end)]
+    var grid: BeatGrid
+    var pieces = untouched
+    var selection: Int?  // First selected bar of the edited track.
+    var bars = 16
+    var undo: [[Piece]] = []
+    var redo: [[Piece]] = []
+    var edited: Bool { pieces != Self.untouched }
+
+    func time(_ bound: Bound, duration: Double) -> Double {
+        switch bound {
+        case .start: return 0
+        case .end: return duration
+        case .bar(let bar): return min(max(0, grid.barTime(bar)), duration)
+        }
+    }
+
+    func length(_ piece: Piece, duration: Double) -> Double { time(piece.to, duration: duration) - time(piece.from, duration: duration) }
+    func outputDuration(_ duration: Double) -> Double { pieces.reduce(0) { $0 + length($1, duration: duration) } }
+
+    // Every piece after the first is whole bars long, so the source grid continues
+    // through the edit; only a track that now starts on a downbeat needs a new anchor.
+    func outputGrid(_ duration: Double) -> BeatGrid {
+        guard let first = pieces.first, first.from != .start else { return grid }
+        return BeatGrid(bpm: grid.bpm, anchor: 0)
+    }
+
+    // Splits the piece containing an edited-track time (on a bar line) and returns the index
+    // of the piece that starts there.
+    func split(_ pieces: [Piece], at outputTime: Double, duration: Double) -> ([Piece], Int)? {
+        var result = pieces
+        var cursor = 0.0
+        for (index, piece) in pieces.enumerated() {
+            let pieceLength = length(piece, duration: duration)
+            if abs(outputTime - cursor) < 1e-6 { return (result, index) }
+            if outputTime < cursor + pieceLength - 1e-6 {
+                let bar = grid.nearestBar(to: time(piece.from, duration: duration) + outputTime - cursor)
+                result.replaceSubrange(index...index, with: [Piece(from: piece.from, to: .bar(bar)), Piece(from: .bar(bar), to: piece.to)])
+                return (result, index + 1)
+            }
+            cursor += pieceLength
+        }
+        return abs(outputTime - cursor) < 1e-6 ? (result, result.count) : nil
+    }
+
+    func normalized(_ pieces: [Piece], duration: Double) -> [Piece] {
+        var result: [Piece] = []
+        for piece in pieces where length(piece, duration: duration) > 1e-9 {
+            if let last = result.last, last.to == piece.from { result[result.count - 1].to = piece.to }
+            else { result.append(piece) }
+        }
+        return result
+    }
+
+    func selectionDescription(_ duration: Double) -> String? {
+        guard let selection else { return nil }
+        let first = outputGrid(duration).number(selection)
+        return "bars \(first)–\(first + bars - 1)"
+    }
+
+    // Removes or repeats the selected bars. Duplicates land right after the selection and
+    // become the new selection, so repeating the command keeps extending.
+    mutating func edit(duplicate: Bool, duration: Double) throws {
+        guard let selection else { throw EditError("Set a selection first: I at its first bar, O at its end.") }
+        let output = outputGrid(duration)
+        let start = output.barTime(selection), end = output.barTime(selection + bars)
+        guard selection >= output.firstBar else { throw EditError("Selections start at bar 1 or later.") }
+        guard end <= outputDuration(duration) + 1e-6 else { throw EditError("The selection runs past the end of the track.") }
+        guard let (first, from) = split(pieces, at: start, duration: duration),
+              let (both, to) = split(first, at: end, duration: duration) else { throw EditError("The selection is not on the grid.") }
+        var updated = both
+        if duplicate { updated.insert(contentsOf: both[from..<to], at: to) }
+        else { updated.removeSubrange(from..<to) }
+        undo.append(pieces)
+        redo.removeAll()
+        pieces = normalized(updated, duration: duration)
+        if duplicate { self.selection = selection + bars }
+    }
+
+    // Moves every bar bound to the bar nearest its old time under the new grid.
+    mutating func regrid(_ updated: BeatGrid) {
+        let old = grid
+        func remap(_ bound: Bound) -> Bound {
+            if case .bar(let bar) = bound { return .bar(updated.nearestBar(to: old.barTime(bar))) }
+            return bound
+        }
+        func remapAll(_ pieces: [Piece]) -> [Piece] { pieces.map { Piece(from: remap($0.from), to: remap($0.to)) } }
+        pieces = remapAll(pieces)
+        undo = undo.map(remapAll)
+        redo = redo.map(remapAll)
+        grid = updated
+    }
+}
+
+struct EditError: LocalizedError {
+    let message: String
+    init(_ message: String) { self.message = message }
+    var errorDescription: String? { message }
+}
+
+// Frame-level view of an edit: where each output frame comes from in the source.
+struct EditTimeline {
+    struct Span: Equatable { var source: Int64; var output: Int64; var count: Int64 }
+    let rate: Double
+    let spans: [Span]
+    let length: Int64
+    let grid: BeatGrid
+
+    init(session: EditSession, rate: Double, frames: Int64) {
+        self.rate = rate
+        let duration = Double(frames) / rate
+        func frame(_ bound: Bound) -> Int64 {
+            switch bound {
+            case .start: return 0
+            case .end: return frames
+            case .bar(let bar): return min(max(0, Int64((session.grid.barTime(bar) * rate).rounded())), frames)
+            }
+        }
+        var spans: [Span] = []
+        var cursor: Int64 = 0
+        for piece in session.pieces {
+            let start = frame(piece.from), count = frame(piece.to) - start
+            guard count > 0 else { continue }
+            spans.append(Span(source: start, output: cursor, count: count))
+            cursor += count
+        }
+        self.spans = spans
+        length = cursor
+        grid = session.outputGrid(duration)
+    }
+
+    var duration: Double { Double(length) / rate }
+
+    func ranges(from output: Int64, count: Int64) -> [(source: Int64, count: Int64)] {
+        var result: [(source: Int64, count: Int64)] = []
+        var position = max(0, output)
+        let end = min(length, output + count)
+        for span in spans where span.output + span.count > position && span.output < end {
+            let taken = min(span.output + span.count, end) - position
+            result.append((span.source + position - span.output, taken))
+            position += taken
+        }
+        return result
+    }
+
+    // Output frames where playback jumps to a different part of the source.
+    var junctions: [Int64] {
+        zip(spans, spans.dropFirst()).compactMap { $0.source + $0.count == $1.source ? nil : $1.output }
+    }
+
+    // Source frame ranges to concatenate, with contiguous spans merged.
+    var segments: [[Int64]] {
+        var result: [[Int64]] = []
+        for span in spans {
+            if let last = result.last, last[1] == span.source { result[result.count - 1][1] = span.source + span.count }
+            else { result.append([span.source, span.source + span.count]) }
+        }
+        return result
+    }
+}
+
+// Min/max envelope at several resolutions so drawing stays cheap at any zoom.
+struct WaveformPeaks {
+    static let baseFrames = 32
+    static let factor = 32
+    var minimum: [[Float]]
+    var maximum: [[Float]]
+    var sampleRate: Double
+
+    func binFrames(_ level: Int) -> Int64 { Int64(Self.baseFrames) * Int64(pow(Double(Self.factor), Double(level))) }
+
+    // Accurate to the finest bin: coarse bins are only used where they fit inside the range.
+    func extremes(from start: Int64, to end: Int64) -> (Float, Float)? {
+        guard end > start, !minimum.isEmpty else { return nil }
+        var low: Float = 0, high: Float = 0, found = false
+        var position = start
+        while position < end {
+            var level = 0
+            while level + 1 < minimum.count {
+                let size = binFrames(level + 1)
+                guard position % size == 0, position + size <= end else { break }
+                level += 1
+            }
+            let size = binFrames(level), bin = Int(position / size)
+            guard bin < minimum[level].count else { break }
+            low = min(low, minimum[level][bin])
+            high = max(high, maximum[level][bin])
+            found = true
+            position = (position / size + 1) * size
+        }
+        return found ? (low, high) : nil
+    }
+}
+
+func waveformPeaks(_ url: URL, cancelled: () -> Bool = { false }) -> WaveformPeaks? {
+    guard let file = try? AVAudioFile(forReading: url), file.length > 0,
+          let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: 65_536) else { return nil }
+    let channels = Int(file.processingFormat.channelCount)
+    let bin = WaveformPeaks.baseFrames
+    var minimum: [Float] = [], maximum: [Float] = []
+    minimum.reserveCapacity(Int(file.length) / bin + 1)
+    maximum.reserveCapacity(Int(file.length) / bin + 1)
+    var low: Float = 0, high: Float = 0, filled = 0, decoded = false
+    while !cancelled() {
+        do { try file.read(into: buffer) } catch { if !decoded { return nil }; break }
+        let frames = Int(buffer.frameLength)
+        guard frames > 0, let data = buffer.floatChannelData else { break }
+        decoded = true
+        var offset = 0
+        // Bins carry across buffer boundaries so every bin covers exactly `bin` frames.
+        while offset < frames {
+            let count = min(bin - filled, frames - offset)
+            for channel in 0..<channels {
+                var value: Float = 0
+                vDSP_minv(data[channel] + offset, 1, &value, vDSP_Length(count))
+                low = min(low, value)
+                vDSP_maxv(data[channel] + offset, 1, &value, vDSP_Length(count))
+                high = max(high, value)
+            }
+            filled += count
+            offset += count
+            if filled == bin {
+                minimum.append(low); maximum.append(high)
+                low = 0; high = 0; filled = 0
+            }
+        }
+    }
+    if cancelled() || !decoded { return nil }
+    if filled > 0 { minimum.append(low); maximum.append(high) }
+    var mins = [minimum], maxs = [maximum]
+    while let last = mins.last, last.count > WaveformPeaks.factor {
+        let previousMax = maxs.last!
+        let groups = stride(from: 0, to: last.count, by: WaveformPeaks.factor)
+        mins.append(groups.map { last[$0..<min(last.count, $0 + WaveformPeaks.factor)].min()! })
+        maxs.append(groups.map { previousMax[$0..<min(previousMax.count, $0 + WaveformPeaks.factor)].max()! })
+    }
+    return WaveformPeaks(minimum: mins, maximum: maxs, sampleRate: file.processingFormat.sampleRate)
+}
+
+// Decodes with AVFoundation, the decoder the editor draws and plays with, so MP3 frame
+// numbers in an edit match what was on screen regardless of encoder-delay headers.
+func decodeToWAV(_ source: URL, to destination: URL) throws {
+    let input = try AVAudioFile(forReading: source)
+    let format = input.processingFormat
+    let settings: [String: Any] = [
+        AVFormatIDKey: kAudioFormatLinearPCM, AVSampleRateKey: format.sampleRate,
+        AVNumberOfChannelsKey: format.channelCount, AVLinearPCMBitDepthKey: 32,
+        AVLinearPCMIsFloatKey: true, AVLinearPCMIsBigEndianKey: false, AVLinearPCMIsNonInterleaved: false
+    ]
+    let output = try AVAudioFile(forWriting: destination, settings: settings, commonFormat: .pcmFormatFloat32, interleaved: false)
+    guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 65_536) else { return }
+    // Stop at the reported length: that is the timeline the editor used.
+    while input.framePosition < input.length {
+        try input.read(into: buffer, frameCount: AVAudioFrameCount(min(65_536, input.length - input.framePosition)))
+        if buffer.frameLength == 0 { break }
+        try output.write(from: buffer)
+    }
+    output.close()
+}
+
+final class EditWaveformView: NSView {
+    var peaks: WaveformPeaks? { didSet { needsDisplay = true } }
+    var timeline: EditTimeline? { didSet { rawCache = nil; if fitted { fit() } else { clampView() } } }
+    var sampleFile: AVAudioFile? { didSet { rawCache = nil } }
+    var selection: (start: Double, end: Double)? { didSet { needsDisplay = true } }
+    var playhead: Double = 0 { didSet { if playhead != oldValue { needsDisplay = true } } }
+    var visibleStart = 0.0
+    var secondsPerPixel = 0.01
+    var fitted = true
+    var onSeek: ((Double) -> Void)?
+    var onGridDrag: ((Double?) -> Void)?
+    var onViewChange: (() -> Void)?
+    private var dragOrigin: CGFloat?
+    private var rawCache: (start: Int64, samples: [Float])?
+
+    var rate: Double { timeline?.rate ?? 44_100 }
+    var duration: Double { timeline?.duration ?? 0 }
+    var span: Double { Double(bounds.width) * secondsPerPixel }
+    var minimumSecondsPerPixel: Double { 0.125 / rate }
+    var maximumSecondsPerPixel: Double { max(minimumSecondsPerPixel, duration / max(1, Double(bounds.width))) }
+
+    override var acceptsFirstResponder: Bool { true }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override var intrinsicContentSize: NSSize { NSSize(width: NSView.noIntrinsicMetric, height: 260) }
+
+    func time(at x: CGFloat) -> Double { visibleStart + Double(x) * secondsPerPixel }
+    func x(for time: Double) -> CGFloat { CGFloat((time - visibleStart) / secondsPerPixel) }
+
+    func fit() {
+        fitted = true
+        secondsPerPixel = maximumSecondsPerPixel
+        visibleStart = 0
+        changed()
+    }
+
+    func zoom(by factor: Double, around x: CGFloat) {
+        let anchor = time(at: x)
+        secondsPerPixel = min(max(secondsPerPixel / factor, minimumSecondsPerPixel), maximumSecondsPerPixel)
+        fitted = secondsPerPixel >= maximumSecondsPerPixel
+        visibleStart = anchor - Double(x) * secondsPerPixel
+        clampView()
+    }
+
+    func clampView() {
+        secondsPerPixel = min(max(secondsPerPixel, minimumSecondsPerPixel), maximumSecondsPerPixel)
+        visibleStart = min(max(0, visibleStart), max(0, duration - span))
+        changed()
+    }
+
+    func center(on time: Double) {
+        visibleStart = time - span / 2
+        clampView()
+    }
+
+    // Pages along with playback the way a DAW follows the playhead.
+    func follow(_ time: Double) {
+        if time < visibleStart || time > visibleStart + span { visibleStart = time - span * 0.05; clampView() }
+    }
+
+    private func changed() {
+        needsDisplay = true
+        onViewChange?()
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        if fitted { fit() } else { clampView() }
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        let precise = event.hasPreciseScrollingDeltas
+        if event.modifierFlags.contains(.command) || event.modifierFlags.contains(.option) {
+            zoom(by: exp(Double(event.scrollingDeltaY) * (precise ? 0.01 : 0.1)), around: convert(event.locationInWindow, from: nil).x)
+            return
+        }
+        let dx = event.scrollingDeltaX, dy = event.scrollingDeltaY
+        let delta = abs(dx) > abs(dy) ? dx : dy
+        visibleStart -= Double(delta) * (precise ? 1 : 10) * secondsPerPixel
+        fitted = false
+        clampView()
+    }
+
+    override func magnify(with event: NSEvent) {
+        zoom(by: 1 + Double(event.magnification), around: convert(event.locationInWindow, from: nil).x)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
+        let x = convert(event.locationInWindow, from: nil).x
+        if event.modifierFlags.contains(.option) { dragOrigin = x; onGridDrag?(0) }
+        else { onSeek?(min(max(0, time(at: x)), duration)) }
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        let x = convert(event.locationInWindow, from: nil).x
+        if let dragOrigin { onGridDrag?(Double(x - dragOrigin) * secondsPerPixel) }
+        else { onSeek?(min(max(0, time(at: x)), duration)) }
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        if dragOrigin != nil { onGridDrag?(nil) }
+        dragOrigin = nil
+    }
+
+    // Channel-averaged samples for sample-level zoom, read straight from the file.
+    func samples(from start: Int64, count: Int) -> [Float] {
+        if let rawCache, start >= rawCache.start, start + Int64(count) <= rawCache.start + Int64(rawCache.samples.count) {
+            let offset = Int(start - rawCache.start)
+            return Array(rawCache.samples[offset..<offset + count])
+        }
+        guard let timeline, let file = sampleFile else { return [] }
+        // Read three screens' worth so scrolling and playhead redraws reuse it.
+        let first = max(0, start - Int64(count)), total = Int64(count) * 3
+        var result: [Float] = []
+        let channels = Int(file.processingFormat.channelCount)
+        for range in timeline.ranges(from: first, count: total) {
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(range.count)) else { return [] }
+            file.framePosition = range.source
+            do { try file.read(into: buffer, frameCount: AVAudioFrameCount(range.count)) } catch { return [] }
+            guard let data = buffer.floatChannelData else { return [] }
+            for frame in 0..<Int(buffer.frameLength) {
+                var sum: Float = 0
+                for channel in 0..<channels { sum += data[channel][frame] }
+                result.append(sum / Float(channels))
+            }
+            result += [Float](repeating: 0, count: Int(range.count) - Int(buffer.frameLength))
+        }
+        rawCache = (first, result)
+        let offset = Int(start - first)
+        guard offset >= 0, offset < result.count else { return [] }
+        return Array(result[offset..<min(result.count, offset + count)])
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.textBackgroundColor.setFill()
+        bounds.fill()
+        guard let timeline, timeline.length > 0 else { return }
+        let labelHeight: CGFloat = 16
+        let middle = (bounds.height - labelHeight) / 2
+        let half = middle - 4
+        if let selection {
+            NSColor.controlAccentColor.withAlphaComponent(0.18).setFill()
+            NSRect(x: x(for: selection.start), y: 0, width: x(for: selection.end) - x(for: selection.start), height: bounds.height).fill()
+        }
+        drawWaveform(timeline, middle: middle, half: half)
+        drawGrid(timeline.grid, height: bounds.height - labelHeight)
+        NSColor.systemRed.setFill()
+        for junction in timeline.junctions {
+            NSRect(x: x(for: Double(junction) / rate) - 1, y: 0, width: 2, height: bounds.height - labelHeight).fill()
+        }
+        NSColor.labelColor.setFill()
+        NSRect(x: x(for: playhead), y: 0, width: 1, height: bounds.height).fill()
+    }
+
+    private func drawWaveform(_ timeline: EditTimeline, middle: CGFloat, half: CGFloat) {
+        let framesPerPixel = secondsPerPixel * rate
+        let columns = Int(bounds.width.rounded(.up))
+        NSColor.secondaryLabelColor.setFill()
+        if framesPerPixel >= Double(WaveformPeaks.baseFrames) {
+            guard let peaks else { return }
+            for column in 0..<columns {
+                let start = Int64(time(at: CGFloat(column)) * rate), end = Int64(time(at: CGFloat(column + 1)) * rate)
+                var low: Float = 0, high: Float = 0
+                for range in timeline.ranges(from: start, count: max(1, end - start)) {
+                    guard let (l, h) = peaks.extremes(from: range.source, to: range.source + range.count) else { continue }
+                    low = min(low, l); high = max(high, h)
+                }
+                let top = middle + CGFloat(high) * half, bottom = middle + CGFloat(low) * half
+                NSRect(x: CGFloat(column), y: bottom, width: 1, height: max(1, top - bottom)).fill()
+            }
+            return
+        }
+        let first = Int64(max(0, visibleStart * rate).rounded(.down))
+        let count = Int((Double(columns) * framesPerPixel).rounded(.up)) + 2
+        let values = samples(from: first, count: count)
+        guard !values.isEmpty else { return }
+        if framesPerPixel >= 1 {
+            for column in 0..<columns {
+                let a = Int(Double(column) * framesPerPixel), b = min(values.count, max(a + 1, Int(Double(column + 1) * framesPerPixel)))
+                guard a < b else { break }
+                let slice = values[a..<b]
+                let top = middle + CGFloat(slice.max()!) * half, bottom = middle + CGFloat(slice.min()!) * half
+                NSRect(x: CGFloat(column), y: bottom, width: 1, height: max(1, top - bottom)).fill()
+            }
+            return
+        }
+        // Individual samples: a connected line, with dots once they are far enough apart.
+        let path = NSBezierPath()
+        let pixelsPerFrame = 1 / framesPerPixel
+        for (i, value) in values.enumerated() {
+            let point = NSPoint(x: x(for: Double(first + Int64(i)) / rate), y: middle + CGFloat(value) * half)
+            if i == 0 { path.move(to: point) } else { path.line(to: point) }
+            if pixelsPerFrame >= 6 { NSBezierPath(ovalIn: NSRect(x: point.x - 2, y: point.y - 2, width: 4, height: 4)).fill() }
+        }
+        NSColor.secondaryLabelColor.setStroke()
+        path.lineWidth = 1
+        path.stroke()
+    }
+
+    private func drawGrid(_ grid: BeatGrid, height: CGFloat) {
+        let barPixels = grid.barDuration / secondsPerPixel
+        let end = visibleStart + span
+        if barPixels / 4 >= 6 {
+            NSColor.tertiaryLabelColor.withAlphaComponent(0.35).setFill()
+            let firstBeat = Int(((visibleStart - grid.anchor) / grid.beatDuration).rounded(.down))
+            let lastBeat = Int(((end - grid.anchor) / grid.beatDuration).rounded(.up))
+            for beat in firstBeat...max(firstBeat, lastBeat) where beat % 4 != 0 {
+                NSRect(x: x(for: grid.anchor + Double(beat) * grid.beatDuration), y: 0, width: 1, height: height).fill()
+            }
+        }
+        var step = 1
+        while Double(step) * barPixels < 6 { step *= 2 }
+        var labelStep = step
+        while Double(labelStep) * barPixels < 44 { labelStep *= 2 }
+        let attributes: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular), .foregroundColor: NSColor.secondaryLabelColor]
+        let firstBar = Int(((visibleStart - grid.anchor) / grid.barDuration).rounded(.down))
+        let lastBar = Int(((end - grid.anchor) / grid.barDuration).rounded(.up))
+        for bar in firstBar...max(firstBar, lastBar) {
+            let number = grid.number(bar)
+            // Bar 1 is always on the lattice, so thinned-out lines stay on musically even bars.
+            let index = number - 1
+            guard ((index % step) + step) % step == 0 else { continue }
+            let position = x(for: grid.barTime(bar))
+            (((index % 16) + 16) % 16 == 0 ? NSColor.systemOrange : NSColor.systemOrange.withAlphaComponent(0.55)).setFill()
+            NSRect(x: position, y: 0, width: 1, height: height).fill()
+            if ((index % labelStep) + labelStep) % labelStep == 0 {
+                ("\(number)" as NSString).draw(at: NSPoint(x: position + 3, y: height + 1), withAttributes: attributes)
+            }
+        }
+    }
+
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .image }
+    override func accessibilityLabel() -> String? { "Edited waveform with bar grid" }
+}
+
+// Whole-track strip: shows where the zoomed view is; click or drag to jump there.
+final class EditOverviewView: NSView {
+    var levels: [Float] = [] { didSet { needsDisplay = true } }
+    var duration = 0.0
+    var visible: (start: Double, end: Double) = (0, 0) { didSet { needsDisplay = true } }
+    var selection: (start: Double, end: Double)? { didSet { needsDisplay = true } }
+    var playhead = 0.0 { didSet { if playhead != oldValue { needsDisplay = true } } }
+    var onSelect: ((Double) -> Void)?
+
+    override var intrinsicContentSize: NSSize { NSSize(width: NSView.noIntrinsicMetric, height: 44) }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func mouseDown(with event: NSEvent) { select(event) }
+    override func mouseDragged(with event: NSEvent) { select(event) }
+
+    func x(for time: Double) -> CGFloat { duration > 0 ? CGFloat(time / duration) * bounds.width : 0 }
+
+    func select(_ event: NSEvent) {
+        guard duration > 0, bounds.width > 0 else { return }
+        let x = convert(event.locationInWindow, from: nil).x
+        onSelect?(Double(min(max(0, x / bounds.width), 1)) * duration)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.controlBackgroundColor.setFill()
+        bounds.fill()
+        if let selection {
+            NSColor.controlAccentColor.withAlphaComponent(0.3).setFill()
+            NSRect(x: x(for: selection.start), y: 0, width: max(1, x(for: selection.end) - x(for: selection.start)), height: bounds.height).fill()
+        }
+        NSColor.secondaryLabelColor.setFill()
+        for (i, level) in levels.enumerated() {
+            let height = max(1, CGFloat(level) * (bounds.height - 4))
+            let x = CGFloat(i) * bounds.width / CGFloat(max(1, levels.count))
+            NSRect(x: x, y: bounds.midY - height / 2, width: max(1, bounds.width / CGFloat(max(1, levels.count))), height: height).fill()
+        }
+        NSColor.controlAccentColor.setStroke()
+        let window = NSBezierPath(rect: NSRect(x: x(for: visible.start), y: 0.5, width: max(2, x(for: visible.end) - x(for: visible.start)), height: bounds.height - 1))
+        window.lineWidth = 1.5
+        window.stroke()
+        NSColor.labelColor.setFill()
+        NSRect(x: x(for: playhead), y: 0, width: 1, height: bounds.height).fill()
+    }
+
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .image }
+    override func accessibilityLabel() -> String? { "Track overview" }
+}
+
+final class EditorController: NSWindowController, NSWindowDelegate {
+    unowned let sorter: Sorter
+    var url: URL?
+    var session = EditSession(grid: BeatGrid(bpm: 120, anchor: 0))
+    var rate = 44_100.0
+    var frames: Int64 = 0
+    var duration: Double { Double(frames) / rate }
+    var timeline: EditTimeline { EditTimeline(session: session, rate: rate, frames: frames) }
+    var playFile: AVAudioFile?
+    var playhead = 0.0
+    let engine = AVAudioEngine()
+    let node = AVAudioPlayerNode()
+    var playing = false
+    var playStart: Int64 = 0
+    var playEnd: Int64 = 0
+    var peaksJob: CancellationFlag?
+    let peaksQueue = DispatchQueue(label: "AudioSorter.peaks", qos: .userInitiated)
+    var dragAnchor: Double?
+    var saving = false
+    var monitor: Any?
+    var timer: Timer?
+
+    let waveform = EditWaveformView()
+    let overview = EditOverviewView()
+    let titleLabel = NSTextField(labelWithString: "")
+    let positionLabel = NSTextField(labelWithString: "")
+    let bpmField = NSTextField(string: "")
+    let barsField = NSTextField(string: "16")
+    let selectionLabel = NSTextField(labelWithString: "")
+    let editLabel = NSTextField(labelWithString: "")
+    let status = NSTextField(wrappingLabelWithString: "")
+    let playButton = NSButton(title: "Play  Space", target: nil, action: nil)
+    let saveButton = NSButton(title: "Save edit  ⌘S", target: nil, action: nil)
+    let undoButton = NSButton(title: "Undo  ⌘Z", target: nil, action: nil)
+    let redoButton = NSButton(title: "Redo  ⌘⇧Z", target: nil, action: nil)
+    let cutButton = NSButton(title: "Cut  X", target: nil, action: nil)
+    let duplicateButton = NSButton(title: "Duplicate  ⌘D", target: nil, action: nil)
+
+    init(sorter: Sorter) {
+        self.sorter = sorter
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1180, height: 640), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        super.init(window: window)
+        window.title = "Cut Bars"
+        window.minSize = NSSize(width: 900, height: 520)
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+        engine.attach(node)
+        // Views no longer clip by default (macOS 14); lines past the edges would spill out.
+        waveform.clipsToBounds = true
+        overview.clipsToBounds = true
+        let content = NSStackView()
+        content.orientation = .vertical
+        content.alignment = .leading
+        content.spacing = 10
+        content.translatesAutoresizingMaskIntoConstraints = false
+        window.contentView!.addSubview(content)
+        NSLayoutConstraint.activate([
+            content.leadingAnchor.constraint(equalTo: window.contentView!.leadingAnchor, constant: 20),
+            content.trailingAnchor.constraint(equalTo: window.contentView!.trailingAnchor, constant: -20),
+            content.topAnchor.constraint(equalTo: window.contentView!.topAnchor, constant: 20),
+            content.bottomAnchor.constraint(equalTo: window.contentView!.bottomAnchor, constant: -20)
+        ])
+        titleLabel.font = .systemFont(ofSize: 16, weight: .semibold)
+        titleLabel.lineBreakMode = .byTruncatingMiddle
+        content.addArrangedSubview(titleLabel)
+        content.addArrangedSubview(overview)
+        content.addArrangedSubview(waveform)
+        waveform.setContentHuggingPriority(.defaultLow - 1, for: .vertical)
+        positionLabel.font = .monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+        let transport = NSStackView(views: [playButton, button("Play into selection  P", #selector(previewSelection)), positionLabel])
+        transport.spacing = 12
+        content.addArrangedSubview(transport)
+        bpmField.placeholderString = "BPM"
+        bpmField.target = self
+        bpmField.action = #selector(bpmEntered)
+        bpmField.widthAnchor.constraint(equalToConstant: 80).isActive = true
+        let gridRow = NSStackView(views: [
+            NSTextField(labelWithString: "BPM"), bpmField, button("÷2", #selector(halveTempo)), button("×2", #selector(doubleTempo)),
+            button("Downbeat at playhead  D", #selector(setDownbeat)),
+            button("◀ 1 ms  ,", #selector(nudgeEarlier)), button("1 ms ▶  .", #selector(nudgeLater))
+        ])
+        gridRow.spacing = 8
+        content.addArrangedSubview(gridRow)
+        barsField.target = self
+        barsField.action = #selector(barsEntered)
+        barsField.widthAnchor.constraint(equalToConstant: 50).isActive = true
+        let presets = NSSegmentedControl(labels: ["8", "16", "32"], trackingMode: .momentary, target: self, action: #selector(presetBars(_:)))
+        let selectionRow = NSStackView(views: [
+            button("Start at playhead  I", #selector(setSelectionStart)), button("End at playhead  O", #selector(setSelectionEnd)),
+            NSTextField(labelWithString: "Bars"), barsField, presets, selectionLabel
+        ])
+        selectionRow.spacing = 8
+        content.addArrangedSubview(selectionRow)
+        for (control, action) in [(playButton, #selector(togglePlayback)), (saveButton, #selector(save)), (undoButton, #selector(undoEdit)),
+                                  (redoButton, #selector(redoEdit)), (cutButton, #selector(cutSelection)), (duplicateButton, #selector(duplicateSelection))] {
+            control.target = self
+            control.action = action
+        }
+        let editRow = NSStackView(views: [cutButton, duplicateButton, undoButton, redoButton, editLabel, saveButton])
+        editRow.spacing = 8
+        content.addArrangedSubview(editRow)
+        status.textColor = .secondaryLabelColor
+        content.addArrangedSubview(status)
+        let help = NSTextField(wrappingLabelWithString: "Click to place the playhead • Scroll to move • Pinch, ⌘/⌥-scroll or = / − to zoom, 0 fits • ⌥-drag slides the grid • ← / → beat, ⇧ bar • Shift+, / . nudges 10 ms • Esc stops")
+        help.textColor = .tertiaryLabelColor
+        help.font = .systemFont(ofSize: 11)
+        content.addArrangedSubview(help)
+        for view in [titleLabel, overview, waveform, status, help] {
+            view.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
+        }
+        waveform.onSeek = { [weak self] time in self?.seek(to: time) }
+        waveform.onViewChange = { [weak self] in self?.refreshOverview() }
+        waveform.onGridDrag = { [weak self] offset in self?.dragGrid(offset) }
+        overview.onSelect = { [weak self] time in
+            self?.waveform.center(on: time)
+            self?.seek(to: time)
+        }
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func button(_ title: String, _ action: Selector) -> NSButton { NSButton(title: title, target: self, action: action) }
+
+    func open(_ url: URL) {
+        if let window, window.isVisible, self.url == url {
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
+        storeSession()
+        stopPlayback()
+        peaksJob?.cancel()
+        do {
+            let file = try AVAudioFile(forReading: url)
+            guard file.length > 0 else { throw EditError("This file has no audio.") }
+            playFile = file
+            waveform.sampleFile = try AVAudioFile(forReading: url)
+            rate = file.processingFormat.sampleRate
+            frames = file.length
+            engine.stop()
+            engine.disconnectNodeOutput(node)
+            engine.connect(node, to: engine.mainMixerNode, format: file.processingFormat)
+        } catch {
+            sorter.report(error)
+            return
+        }
+        self.url = url
+        if let remembered = sorter.editSessions[url] { session = remembered }
+        else {
+            let tagged = (try? sorter.helper("read-bpm", file: url))?["bpm"] as? Double
+            session = EditSession(grid: BeatGrid(bpm: tagged ?? 120, anchor: 0))
+            status.stringValue = tagged.map { "BPM \(format($0)) from the file's tag. Set a downbeat (D) and check the grid late in the track." }
+                ?? "No BPM tag. Enter the BPM, then set a downbeat (D)."
+        }
+        playhead = 0
+        titleLabel.stringValue = url.lastPathComponent
+        window?.title = "Cut Bars — \(url.lastPathComponent)"
+        waveform.peaks = nil
+        waveform.fitted = true
+        refresh()
+        loadPeaks(url)
+        if monitor == nil {
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in self?.handle(event) == true ? nil : event }
+        }
+        if timer == nil {
+            timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { [weak self] _ in self?.tick() }
+        }
+        if window?.isVisible != true { window?.center() }
+        showWindow(nil)
+        window?.makeKeyAndOrderFront(nil)
+        window?.makeFirstResponder(waveform)
+    }
+
+    func loadPeaks(_ url: URL) {
+        let job = CancellationFlag()
+        peaksJob = job
+        let previous = status.stringValue
+        status.stringValue = "Reading waveform… " + previous
+        peaksQueue.async { [weak self] in
+            let peaks = waveformPeaks(url, cancelled: { job.isCancelled })
+            DispatchQueue.main.async {
+                guard let self, !job.isCancelled, self.url == url else { return }
+                self.status.stringValue = peaks == nil ? "Cannot draw this file's waveform." : previous
+                self.waveform.peaks = peaks
+                self.refreshOverview()
+            }
+        }
+    }
+
+    func storeSession() {
+        if let url { sorter.editSessions[url] = session }
+    }
+
+    func format(_ bpm: Double) -> String {
+        bpm == bpm.rounded() ? String(format: "%.0f", bpm) : String(format: "%.2f", bpm)
+    }
+
+    func stamp(_ seconds: Double) -> String {
+        String(format: "%d:%06.3f", Int(seconds) / 60, seconds.truncatingRemainder(dividingBy: 60))
+    }
+
+    // Recomputes everything derived from the session and pushes it to the controls.
+    func refresh() {
+        let timeline = timeline
+        waveform.timeline = timeline
+        playhead = min(playhead, timeline.duration)
+        waveform.playhead = playhead
+        if bpmField.currentEditor() == nil { bpmField.stringValue = format(session.grid.bpm) }
+        if barsField.currentEditor() == nil { barsField.stringValue = "\(session.bars)" }
+        if let selection = session.selection {
+            let range = (timeline.grid.barTime(selection), timeline.grid.barTime(selection + session.bars))
+            waveform.selection = range
+            overview.selection = range
+            selectionLabel.stringValue = "Selected \(session.selectionDescription(duration) ?? "")"
+        } else {
+            waveform.selection = nil
+            overview.selection = nil
+            selectionLabel.stringValue = "No selection"
+        }
+        let junctions = timeline.junctions.count
+        editLabel.stringValue = session.edited
+            ? "\(stamp(duration)) → \(stamp(timeline.duration)) • \(junctions) splice\(junctions == 1 ? "" : "s")"
+            : "Unedited"
+        saveButton.isEnabled = session.edited && !saving
+        undoButton.isEnabled = !session.undo.isEmpty
+        redoButton.isEnabled = !session.redo.isEmpty
+        cutButton.isEnabled = session.selection != nil
+        duplicateButton.isEnabled = session.selection != nil
+        updatePosition()
+        refreshOverview()
+    }
+
+    func refreshOverview() {
+        let timeline = timeline
+        overview.duration = timeline.duration
+        overview.visible = (waveform.visibleStart, waveform.visibleStart + waveform.span)
+        overview.playhead = playhead
+        guard let peaks = waveform.peaks, timeline.length > 0 else { overview.levels = []; return }
+        let bins = 600
+        var levels: [Float] = []
+        for bin in 0..<bins {
+            let start = timeline.length * Int64(bin) / Int64(bins), end = timeline.length * Int64(bin + 1) / Int64(bins)
+            var level: Float = 0
+            for range in timeline.ranges(from: start, count: end - start) {
+                if let (low, high) = peaks.extremes(from: range.source, to: range.source + range.count) { level = max(level, -low, high) }
+            }
+            levels.append(level)
+        }
+        let loudest = levels.max() ?? 0
+        let normalized = loudest > 0 ? levels.map { $0 / loudest } : levels
+        if normalized != overview.levels { overview.levels = normalized }
+    }
+
+    func updatePosition() {
+        let grid = timeline.grid
+        let beats = Int(((playhead - grid.anchor) / grid.beatDuration + 1e-6).rounded(.down))
+        let bar = Int((Double(beats) / 4).rounded(.down))
+        positionLabel.stringValue = "Bar \(grid.number(bar)).\(beats - bar * 4 + 1)   \(stamp(playhead)) / \(stamp(timeline.duration))"
+        playButton.title = playing ? "Pause  Space" : "Play  Space"
+        waveform.playhead = playhead
+        overview.playhead = playhead
+    }
+
+    func handle(_ event: NSEvent) -> Bool {
+        guard let window, event.window === window, NSApp.modalWindow == nil else { return false }
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
+        if flags.contains(.command) {
+            switch key {
+            case "s": save(); return true
+            case "d": duplicateSelection(); return true
+            case "z": flags.contains(.shift) ? redoEdit() : undoEdit(); return true
+            default: return false
+            }
+        }
+        if window.firstResponder is NSText {
+            // Typing a BPM or bar count; Esc leaves the field without applying.
+            if event.keyCode == 53 { refresh(); window.makeFirstResponder(waveform); return true }
+            return false
+        }
+        guard !flags.contains(.control), !flags.contains(.option) else { return false }
+        let shift = flags.contains(.shift)
+        switch event.keyCode {
+        case 49: togglePlayback(); return true
+        case 53: stopAndKeepPosition(); return true
+        case 51, 117: cutSelection(); return true
+        case 123: step(-1, bars: shift); return true
+        case 124: step(1, bars: shift); return true
+        default: break
+        }
+        switch key {
+        case "=", "+": waveform.zoom(by: 2, around: waveform.x(for: playhead)); return true
+        case "-", "_": waveform.zoom(by: 0.5, around: waveform.x(for: playhead)); return true
+        case "0", ")": waveform.fit(); return true
+        case "d": setDownbeat(); return true
+        case "i": setSelectionStart(); return true
+        case "o": setSelectionEnd(); return true
+        case "p": previewSelection(); return true
+        case "x": cutSelection(); return true
+        case ",", "<": nudge(shift ? -0.01 : -0.001); return true
+        case ".", ">": nudge(shift ? 0.01 : 0.001); return true
+        default: return false
+        }
+    }
+
+    // MARK: Playback
+
+    func seek(to time: Double) {
+        playhead = min(max(0, time), timeline.duration)
+        if playing { play(from: playhead) } else { updatePosition() }
+    }
+
+    // Moves to the next beat (or bar) line, so a playhead between lines snaps onto the grid.
+    func step(_ direction: Int, bars: Bool) {
+        let grid = timeline.grid
+        let unit = bars ? grid.barDuration : grid.beatDuration
+        let position = (playhead - grid.anchor) / unit
+        let target = direction > 0 ? (position + 1e-6).rounded(.down) + 1 : (position - 1e-6).rounded(.up) - 1
+        seek(to: grid.anchor + target * unit)
+        waveform.follow(playhead)
+    }
+
+    @objc func togglePlayback() {
+        if playing { stopAndKeepPosition() }
+        else { play(from: playhead >= timeline.duration - 0.05 ? 0 : playhead) }
+    }
+
+    func play(from time: Double) {
+        stopPlayback()
+        let timeline = timeline
+        guard let file = playFile, timeline.length > 0 else { return }
+        let start = min(max(0, Int64((time * rate).rounded())), timeline.length - 1)
+        do {
+            if !engine.isRunning { engine.prepare(); try engine.start() }
+        } catch {
+            status.stringValue = "Cannot start audio output: \(error.localizedDescription)"
+            return
+        }
+        for range in timeline.ranges(from: start, count: timeline.length - start) {
+            node.scheduleSegment(file, startingFrame: range.source, frameCount: AVAudioFrameCount(range.count), at: nil)
+        }
+        playStart = start
+        playEnd = timeline.length
+        playhead = Double(start) / rate
+        node.play()
+        playing = true
+        updatePosition()
+    }
+
+    func renderedPosition() -> Int64? {
+        guard let nodeTime = node.lastRenderTime, let playerTime = node.playerTime(forNodeTime: nodeTime) else { return nil }
+        return playStart + max(0, Int64(Double(playerTime.sampleTime) * rate / playerTime.sampleRate))
+    }
+
+    func tick() {
+        guard playing, let position = renderedPosition() else { return }
+        if position >= playEnd {
+            stopPlayback()
+            playhead = Double(playEnd) / rate
+        } else {
+            playhead = Double(position) / rate
+        }
+        waveform.follow(playhead)
+        updatePosition()
+    }
+
+    func stopPlayback() {
+        node.stop()
+        playing = false
+    }
+
+    func stopAndKeepPosition() {
+        if playing, let position = renderedPosition() { playhead = min(Double(position), Double(playEnd)) / rate }
+        stopPlayback()
+        updatePosition()
+    }
+
+    // Plays from two bars before the selection, which is also where the last edit's splice sits.
+    @objc func previewSelection() {
+        guard let selection = session.selection else { status.stringValue = "Set a selection first (I)."; return }
+        let grid = timeline.grid
+        let start = max(0, grid.barTime(selection - 2))
+        waveform.follow(start)
+        play(from: start)
+    }
+
+    // MARK: Grid
+
+    // Grid changes keep edits on the same bar numbers, which then sit on the adjusted lines.
+    func changeGrid(_ grid: BeatGrid, remap: Bool = false) {
+        guard grid.bpm.isFinite, (40...300).contains(grid.bpm), grid.anchor.isFinite else { return }
+        if playing { stopAndKeepPosition() }
+        if remap { session.regrid(grid) } else { session.grid = grid }
+        refresh()
+    }
+
+    @objc func bpmEntered() {
+        let text = bpmField.stringValue.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: ",", with: ".")
+        guard let bpm = Double(text), (40...300).contains(bpm) else {
+            status.stringValue = "Enter a BPM between 40 and 300."
+            bpmField.stringValue = format(session.grid.bpm)
+            return
+        }
+        changeGrid(BeatGrid(bpm: bpm, anchor: session.grid.anchor))
+        window?.makeFirstResponder(waveform)
+    }
+
+    @objc func halveTempo() { changeGrid(BeatGrid(bpm: session.grid.bpm / 2, anchor: session.grid.anchor)) }
+    @objc func doubleTempo() { changeGrid(BeatGrid(bpm: session.grid.bpm * 2, anchor: session.grid.anchor)) }
+
+    // The playhead is on the edited track; the downbeat is stored on the original.
+    func sourceTime(_ output: Double) -> Double? {
+        let frame = Int64((output * rate).rounded())
+        guard let range = timeline.ranges(from: frame, count: 1).first else { return output >= timeline.duration ? duration : nil }
+        return Double(range.source) / rate
+    }
+
+    @objc func setDownbeat() {
+        guard let source = sourceTime(playhead) else { return }
+        let selectionTime = session.selection.map { timeline.grid.barTime($0) }
+        changeGrid(BeatGrid(bpm: session.grid.bpm, anchor: source), remap: true)
+        // Keep the selection on whichever bar line is now nearest to where it was.
+        if let selectionTime { session.selection = timeline.grid.nearestBar(to: selectionTime) }
+        refresh()
+        status.stringValue = "Downbeat set at \(stamp(playhead)). Check that later bar lines still sit on the kicks; adjust BPM if they drift."
+    }
+
+    func nudge(_ seconds: Double) { changeGrid(BeatGrid(bpm: session.grid.bpm, anchor: session.grid.anchor + seconds)) }
+    @objc func nudgeEarlier() { nudge(-0.001) }
+    @objc func nudgeLater() { nudge(0.001) }
+
+    func dragGrid(_ offset: Double?) {
+        guard let offset else { dragAnchor = nil; return }
+        if dragAnchor == nil { dragAnchor = session.grid.anchor }
+        changeGrid(BeatGrid(bpm: session.grid.bpm, anchor: dragAnchor! + offset))
+    }
+
+    // MARK: Selection and edits
+
+    @objc func setSelectionStart() {
+        let grid = timeline.grid
+        session.selection = max(grid.firstBar, grid.nearestBar(to: playhead))
+        refresh()
+    }
+
+    @objc func setSelectionEnd() {
+        guard let selection = session.selection else { status.stringValue = "Set the selection start first (I)."; return }
+        let end = timeline.grid.nearestBar(to: playhead)
+        guard end > selection else { status.stringValue = "The end must be after the selection start."; return }
+        session.bars = end - selection
+        refresh()
+    }
+
+    @objc func barsEntered() {
+        guard let bars = Int(barsField.stringValue.trimmingCharacters(in: .whitespaces)), (1...1024).contains(bars) else {
+            status.stringValue = "Enter a whole number of bars."
+            barsField.stringValue = "\(session.bars)"
+            return
+        }
+        session.bars = bars
+        refresh()
+        window?.makeFirstResponder(waveform)
+    }
+
+    @objc func presetBars(_ sender: NSSegmentedControl) {
+        session.bars = [8, 16, 32][sender.selectedSegment]
+        refresh()
+    }
+
+    func applyEdit(duplicate: Bool) {
+        if playing { stopAndKeepPosition() }
+        let before = session.selectionDescription(duration)
+        do {
+            try session.edit(duplicate: duplicate, duration: duration)
+            if !duplicate, let selection = session.selection { playhead = timeline.grid.barTime(selection) }
+            refresh()
+            status.stringValue = duplicate
+                ? "Duplicated \(before ?? ""); the copy is selected, so ⌘D again extends further. P plays into it."
+                : "Cut \(before ?? ""). The red line marks the splice; P plays across it."
+        } catch {
+            status.stringValue = error.localizedDescription
+            NSSound.beep()
+        }
+    }
+
+    @objc func cutSelection() { applyEdit(duplicate: false) }
+    @objc func duplicateSelection() { applyEdit(duplicate: true) }
+
+    @objc func undoEdit() {
+        guard let previous = session.undo.popLast() else { return }
+        if playing { stopAndKeepPosition() }
+        session.redo.append(session.pieces)
+        session.pieces = previous
+        refresh()
+    }
+
+    @objc func redoEdit() {
+        guard let next = session.redo.popLast() else { return }
+        if playing { stopAndKeepPosition() }
+        session.undo.append(session.pieces)
+        session.pieces = next
+        refresh()
+    }
+
+    // MARK: Saving
+
+    @objc func save() {
+        guard !saving, let url else { return }
+        guard session.edited else { status.stringValue = "Nothing to save yet: cut or duplicate some bars first."; return }
+        let output = sorter.editURL(for: url)
+        guard !FileManager.default.fileExists(atPath: output.path) else {
+            status.stringValue = "\(output.lastPathComponent) already exists. Move it to Trash or rename it, then save again."
+            NSSound.beep()
+            return
+        }
+        let timeline = timeline
+        let request: [String: Any] = ["segments": timeline.segments, "fade": Int((rate * 0.005).rounded()), "output": output.path]
+        let mp3 = url.pathExtension.lowercased() == "mp3"
+        saving = true
+        refresh()
+        status.stringValue = mp3 ? "Saving… decoding and re-encoding the MP3." : "Saving…"
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            let result = Result { () throws -> [String: Any] in
+                var request = request
+                let work = FileManager.default.temporaryDirectory.appendingPathComponent("AudioSorter-\(UUID().uuidString)", isDirectory: true)
+                defer { try? FileManager.default.removeItem(at: work) }
+                if mp3 {
+                    try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
+                    let decoded = work.appendingPathComponent("decoded.wav")
+                    try decodeToWAV(url, to: decoded)
+                    request["decoded"] = decoded.path
+                }
+                let json = String(decoding: try JSONSerialization.data(withJSONObject: request), as: UTF8.self)
+                return try sorter.helper("cut", file: url, text: json)
+            }
+            DispatchQueue.main.async { [self] in
+                saving = false
+                refresh()
+                switch result {
+                case .success(let report):
+                    let dropped = report["dropped"] as? [String] ?? []
+                    let note = dropped.isEmpty ? "" : " Removed timeline-specific metadata that no longer lines up: \(dropped.joined(separator: ", "))."
+                    status.stringValue = "Saved \(output.lastPathComponent) (\(stamp(timeline.duration))). The original is unchanged.\(note)"
+                    sorter.editSaved(output)
+                case .failure(let error):
+                    status.stringValue = "Not saved: \(error.localizedDescription)"
+                    if let window { NSAlert(error: error).beginSheetModal(for: window) }
+                }
+            }
+        }
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        stopPlayback()
+        engine.stop()
+        peaksJob?.cancel()
+        storeSession()
+        timer?.invalidate()
+        timer = nil
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
     }
 }
 
