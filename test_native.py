@@ -1444,6 +1444,116 @@ assert(editor.status.stringValue.hasPrefix("Recorded Plain.wav for Rekordbox"), 
             result = subprocess.run(["swift", str(script), directory, sys.executable, helper], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_editor_grid_detection(self):
+        import math
+        import struct
+        import wave
+        source = Path(__file__).with_name("main.swift").read_text().split("let app = NSApplication.shared", 1)[0]
+        source = source.replace("final class Sorter:", "class Sorter:")
+        harness = r'''
+// A stand-in detector: checks what the editor sends and answers like detect.py.
+class TestSorter: Sorter {
+    var model: URL?
+    var answer: [String: Any] = [:]
+    var fail = false
+    var hold: DispatchSemaphore?
+    var requests: [(frames: Int64, model: String)] = []
+    var decoded: [URL] = []
+    override var detectModel: URL? { model }
+    override func helper(_ action: String, file: URL, text: String? = nil) throws -> [String: Any] {
+        if action == "read-bpm" { return [:] }  // No BPM tag.
+        assert(action == "detect")
+        let request = try JSONSerialization.jsonObject(with: Data(text!.utf8)) as! [String: Any]
+        requests.append((try AVAudioFile(forReading: file).length, request["model"] as! String))
+        decoded.append(file)
+        hold?.wait()
+        if fail { throw NSError(domain: "test", code: 1, userInfo: [NSLocalizedDescriptionKey: "model crashed"]) }
+        return answer
+    }
+}
+func settle(_ condition: () -> Bool) {
+    let deadline = Date().addingTimeInterval(30)
+    while !condition() && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+    assert(condition(), "timed out")
+}
+let app = NSApplication.shared
+let root = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
+let track = root.appendingPathComponent("track.wav"), other = root.appendingPathComponent("other.wav")
+let sorter = TestSorter()
+let editor = EditorController(sorter: sorter)
+sorter.editorController = editor
+editor.open(track)
+assert(!editor.session.tempoSet && editor.detectButton.isEnabled)
+// Without the model, Detect explains how to install it.
+editor.detectGrid()
+assert(editor.status.stringValue.hasPrefix("Grid detection isn't installed") && sorter.requests.isEmpty)
+// The detector gets the track as AVFoundation decodes it, plus the model; the grid is applied as placed.
+sorter.model = root.appendingPathComponent("final0.ckpt")
+sorter.answer = ["bpm": 125.0, "anchor": 0.3, "confidence": 0.97, "downbeatConfidence": 0.7, "drift": 0.01]
+editor.detectGrid()
+assert(editor.detecting && !editor.detectButton.isEnabled && editor.detectButton.title == "Detecting…")
+settle { !editor.detecting }
+assert(sorter.requests.count == 1 && sorter.requests[0].frames == editor.frames && sorter.requests[0].model == sorter.model!.path)
+assert(!FileManager.default.fileExists(atPath: sorter.decoded[0].path))
+assert(editor.session.grid == BeatGrid(bpm: 125, anchor: 0.3) && editor.session.tempoSet && editor.session.downbeatSet)
+assert(editor.bpmField.stringValue == "125" && editor.waveform.showsGrid && editor.waveform.snapping == (editor.snapButton.state == .on))
+assert(editor.status.stringValue.hasPrefix("Detected 125 BPM, bar 1 at 0:00.300, 97% of beats on the grid."), editor.status.stringValue)
+assert(editor.status.stringValue.contains("The downbeat is uncertain (70% of bars agree)"))
+// ⌘Z straight after returns to the grid from before.
+assert(editor.undoButton.isEnabled)
+editor.undoEdit()
+assert(!editor.session.tempoSet && !editor.session.downbeatSet && editor.status.stringValue == "Back to the grid from before Detect.")
+assert(!editor.undoButton.isEnabled)
+// Once the grid is changed again, ⌘Z no longer reverts the detection.
+sorter.answer = ["bpm": 124.5, "anchor": 1.1, "confidence": 0.99, "downbeatConfidence": 1.0, "drift": 0.05]
+editor.detectGrid()
+settle { !editor.detecting }
+assert(editor.status.stringValue.contains("drifts by up to 50 ms") && !editor.status.stringValue.contains("uncertain"))
+editor.nudge(0.001)
+assert(editor.detectUndo == nil && !editor.undoButton.isEnabled)
+// Cues and edits keep their bars when detection replaces the grid; undo after an edit undoes the edit first.
+editor.playhead = 2.0
+editor.addCue()
+editor.detectGrid()
+settle { !editor.detecting }
+assert(editor.session.cues.count == 1 && editor.detectUndo?.undoCount == editor.session.undo.count)
+editor.playhead = 4.0
+editor.addCue()
+editor.undoEdit()
+assert(editor.session.cues.count == 1 && editor.session.grid.anchor == 1.1)
+editor.undoEdit()
+assert(editor.status.stringValue == "Back to the grid from before Detect." && editor.session.cues.count == 1)
+// A failure is reported and changes nothing.
+sorter.fail = true
+let unchanged = editor.session.grid
+editor.detectGrid()
+settle { !editor.detecting }
+assert(editor.status.stringValue == "Detection failed: model crashed" && editor.session.grid == unchanged)
+sorter.fail = false
+// Opening another track abandons a detection still running.
+sorter.hold = DispatchSemaphore(value: 0)
+editor.detectGrid()
+settle { sorter.requests.count == 5 }
+editor.open(other)
+sorter.hold!.signal()
+RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+assert(!editor.detecting && !editor.session.tempoSet && editor.url == other)
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rate = 44100
+            frames = b"".join(struct.pack("<hh", s, s) for s in (int(9000 * math.sin(i / 15)) for i in range(rate * 6)))
+            for name in ("track.wav", "other.wav"):
+                with wave.open(str(root / name), "wb") as output:
+                    output.setnchannels(2)
+                    output.setsampwidth(2)
+                    output.setframerate(rate)
+                    output.writeframes(frames)
+            script = root / "main.swift"
+            script.write_text(source + harness)
+            result = subprocess.run(["swift", str(script), directory], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg unavailable")
     def test_editor_peaks_decoding_and_saving_end_to_end(self):
         import math

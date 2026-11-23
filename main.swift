@@ -394,6 +394,13 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
 
     var rekordboxXML: URL { URL(fileURLWithPath: (configuration.rekordboxXML as NSString).expandingTildeInPath) }
 
+    // The beat_this model for grid detection, present when the app was built with --detect.
+    var detectModel: URL? {
+        guard let file = Bundle.main.resourceURL?.appendingPathComponent("detect-model"),
+              let path = try? String(contentsOf: file, encoding: .utf8), FileManager.default.fileExists(atPath: path) else { return nil }
+        return URL(fileURLWithPath: path)
+    }
+
     func recordGrid(_ url: URL, grid: BeatGrid, cues: [Double], duration: Double, sampleRate: Double) throws {
         try gridStore.set(url, grid: grid, cues: cues, duration: duration, sampleRate: sampleRate)
         exportRekordbox()
@@ -2776,6 +2783,12 @@ final class EditorController: NSWindowController, NSWindowDelegate {
     let writeBPMButton = NSButton(title: "Write BPM to tag", target: nil, action: nil)
     let cueLabel = NSTextField(labelWithString: "")
     let recordButton = NSButton(title: "Save grid & cues  ⌘⇧S", target: nil, action: nil)
+    let detectButton = NSButton(title: "Detect", target: nil, action: nil)
+    var detecting = false
+    var detectJob: CancellationFlag?
+    // The session from before the last detection, while ⌘Z can still return to it: until the
+    // grid is changed again, and only when the undo stack is back where detection left it.
+    var detectUndo: (session: EditSession, undoCount: Int)?
     // The original file's BPM tag, so writing it is only offered when it would change.
     var taggedBPM: Double?
     let metronome = Metronome()
@@ -2828,12 +2841,14 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         bpmField.action = #selector(bpmEntered)
         bpmField.widthAnchor.constraint(equalToConstant: 80).isActive = true
         let gridRow = NSStackView(views: [
-            NSTextField(labelWithString: "BPM"), bpmField, button("Tap  T", #selector(tapPressed)), button("÷2", #selector(halveTempo)), button("×2", #selector(doubleTempo)), writeBPMButton,
+            NSTextField(labelWithString: "BPM"), bpmField, detectButton, button("Tap  T", #selector(tapPressed)), button("÷2", #selector(halveTempo)), button("×2", #selector(doubleTempo)), writeBPMButton,
             button("Downbeat at playhead  ⌘\\", #selector(setDownbeat)),
             button("◀ 1 ms  ,", #selector(nudgeEarlier)), button("1 ms ▶  .", #selector(nudgeLater)), snapButton
         ])
         writeBPMButton.target = self
         writeBPMButton.action = #selector(writeBPM)
+        detectButton.target = self
+        detectButton.action = #selector(detectGrid)
         snapButton.state = UserDefaults.standard.object(forKey: "editorSnap") as? Bool ?? true ? .on : .off
         snapButton.target = self
         snapButton.action = #selector(snapChanged)
@@ -2895,6 +2910,9 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         storeSession()
         stopPlayback()
         peaksJob?.cancel()
+        detectJob?.cancel()
+        detecting = false
+        detectUndo = nil
         do {
             let file = try AVAudioFile(forReading: url)
             guard file.length > 0 else { throw EditError("This file has no audio.") }
@@ -3026,7 +3044,12 @@ final class EditorController: NSWindowController, NSWindowDelegate {
             : "No audio edits: record this file's grid and cues for Rekordbox (same as ⌘⇧S)."
         writeBPMButton.isEnabled = tempoSet && taggedBPM != tagBPM && !saving
         writeBPMButton.toolTip = "Write \(format(tagBPM)) to the original's BPM tag (currently \(taggedBPM.map(format) ?? "none")). Saved edits get it automatically."
-        undoButton.isEnabled = !session.undo.isEmpty
+        undoButton.isEnabled = !session.undo.isEmpty || detectUndo?.undoCount == session.undo.count
+        detectButton.isEnabled = !detecting && !saving
+        detectButton.title = detecting ? "Detecting…" : "Detect"
+        detectButton.toolTip = sorter.detectModel == nil
+            ? "Grid detection isn't installed: run zsh build.sh --detect."
+            : "Detect the BPM and downbeat with beat_this (about 10 s for a 6-minute track). ⌘Z right after undoes it."
         redoButton.isEnabled = !session.redo.isEmpty
         cutButton.isEnabled = session.selection != nil
         duplicateButton.isEnabled = session.selection != nil
@@ -3225,6 +3248,7 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         guard grid.bpm.isFinite, (40...300).contains(grid.bpm), grid.anchor.isFinite else { return }
         // Typing or tapping a BPM sets the tempo; anything that places the grid needs one.
         if placed || remap { guard tempoKnown() else { return } } else { session.tempoSet = true }
+        detectUndo = nil
         // Unedited playback does not depend on the grid, so tapping and nudging can continue live.
         if playing && session.edited { stopAndKeepPosition() }
         if remap { session.regrid(grid) } else { session.grid = grid }
@@ -3372,6 +3396,14 @@ final class EditorController: NSWindowController, NSWindowDelegate {
     @objc func duplicateSelection() { applyEdit(duplicate: true) }
 
     @objc func undoEdit() {
+        if let before = detectUndo, before.undoCount == session.undo.count {
+            if playing { stopAndKeepPosition() }
+            session = before.session
+            detectUndo = nil
+            refresh()
+            status.stringValue = "Back to the grid from before Detect."
+            return
+        }
         if playing && !session.undo.isEmpty { stopAndKeepPosition() }
         if session.undoLast() { refresh() }
     }
@@ -3508,6 +3540,75 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         }
     }
 
+    // MARK: Detection
+
+    // Runs beat_this on the track as AVFoundation decodes it, so detected times are on the
+    // editor's timeline, then applies the grid as if typed and placed (see detect.py).
+    @objc func detectGrid() {
+        guard let url, !detecting, !saving else { return }
+        guard let model = sorter.detectModel else {
+            status.stringValue = "Grid detection isn't installed: run zsh build.sh --detect, then reopen the app."
+            NSSound.beep()
+            return
+        }
+        let job = CancellationFlag()
+        detectJob = job
+        detecting = true
+        refresh()
+        status.stringValue = "Detecting beats… (about 10 s for a 6-minute track)"
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            let result = Result { () throws -> [String: Any] in
+                let work = FileManager.default.temporaryDirectory.appendingPathComponent("AudioSorter-\(UUID().uuidString)", isDirectory: true)
+                try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
+                defer { try? FileManager.default.removeItem(at: work) }
+                let decoded = work.appendingPathComponent("decoded.wav")
+                try decodeToWAV(url, to: decoded)
+                let request = String(decoding: try JSONSerialization.data(withJSONObject: ["model": model.path]), as: UTF8.self)
+                return try sorter.helper("detect", file: decoded, text: request)
+            }
+            DispatchQueue.main.async { [self] in
+                // Opening another track or closing the editor abandons the result.
+                guard !job.isCancelled, self.url == url else { return }
+                detecting = false
+                switch result {
+                case .success(let report): applyDetected(report)
+                case .failure(let error):
+                    refresh()
+                    status.stringValue = "Detection failed: \(error.localizedDescription)"
+                    NSSound.beep()
+                }
+            }
+        }
+    }
+
+    func applyDetected(_ report: [String: Any]) {
+        guard let bpm = report["bpm"] as? Double, let anchor = report["anchor"] as? Double, (40...300).contains(bpm) else {
+            refresh()
+            status.stringValue = "Detection returned no usable grid."
+            return
+        }
+        if playing && session.edited { stopAndKeepPosition() }
+        let before = session
+        let selectionTime = session.selection.map { timeline.grid.barTime($0) }
+        session.regrid(BeatGrid(bpm: bpm, anchor: anchor))
+        session.tempoSet = true
+        session.downbeatSet = true
+        if let selectionTime { session.selection = timeline.grid.nearestBar(to: selectionTime) }
+        detectUndo = (before, session.undo.count)
+        refresh()
+        let grid = timeline.grid
+        let onGrid = Int(((report["confidence"] as? Double ?? 0) * 100).rounded())
+        var message = "Detected \(format(bpm)) BPM, bar 1 at \(stamp(grid.barTime(grid.firstBar))), \(onGrid)% of beats on the grid."
+        if let share = report["downbeatConfidence"] as? Double, share < 0.8 {
+            message += " The downbeat is uncertain (\(Int((share * 100).rounded()))% of bars agree): check bar 1, and press ⌘\\ on the first kick if it's off."
+        }
+        if onGrid < 80 { message += " Few beats sit on one grid: try ÷2 or ×2, or set the BPM by hand." }
+        if let drift = report["drift"] as? Double, drift > 0.03 {
+            message += " The tempo drifts by up to \(Int((drift * 1000).rounded())) ms, so no constant grid fits everywhere."
+        }
+        status.stringValue = message + " Check a late bar with the click (K); ⌘Z undoes."
+    }
+
     // Records the original's grid, with cues mapped back to where they play in it. The audio
     // file is not touched: the record lives in the app's store and the rekordbox XML.
     @objc func saveGridAndCues() {
@@ -3535,6 +3636,8 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         stopPlayback()
         engine.stop()
         peaksJob?.cancel()
+        detectJob?.cancel()
+        detecting = false
         storeSession()
         timer?.invalidate()
         timer = nil

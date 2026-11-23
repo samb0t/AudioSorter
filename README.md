@@ -17,6 +17,17 @@ open "Audio Sorter.app"
 
 Keep this folder and `.venv` in place: the app references its Python environment.
 
+**Grid detection** (optional) needs PyTorch and the beat_this model, several hundred MB
+in all. Build once with:
+
+```sh
+zsh build.sh --detect
+```
+
+This installs `requirements-detect.txt` into `.venv` and downloads the `final0` model
+(78 MB, checksum verified) to `.build/beat_this/`. Later plain builds keep detection
+enabled; without it, **Detect** in Cut Bars explains how to install it.
+
 ## Configuration
 
 `config.json` contains your personal settings and is git-ignored, along with build
@@ -179,7 +190,15 @@ or import files automatically. Keep gig playlists as curated regular playlists.
 **Cut Bars…** (toolbar, **B**, or **File → Cut Bars… ⌘B**) opens the current track in
 an editor for removing or repeating whole bars, the way you would in Ableton:
 
-1. **Set the grid.** The BPM comes from the file's BPM tag when present (Beatport
+1. **Set the grid.** Press **Detect** to have
+   [beat_this](https://github.com/CPJKU/beat_this) find the BPM and downbeat (about
+   10 s for a 6-minute track, in the background). The grid is applied straight away
+   and the status line says how well it fits: the share of beats on the grid, and a
+   warning if the downbeat is uncertain or the tempo drifts. Check bar 1 and a late
+   bar with the click, and fix anything below as usual; ⌘Z right after Detect (before
+   changing the grid again) returns to the grid from before. Detection prefers a whole
+   BPM when it fits as well, and lines the grid up with the attacks in the audio.
+   Without detection, the BPM comes from the file's BPM tag when present (Beatport
    and most stores set one). Without a tag (promos often have none) the BPM field
    starts empty and no grid is drawn; setting the downbeat, cues, selections and
    edits wait until you type the BPM, or tap **T** (or **Tap**) along with
@@ -527,8 +546,10 @@ verification was performed for this feature; disposable-copy checks remain requi
 
 - [x] Cut Bars editor: manual BPM/downbeat grid, zoom to sample level, cut and
   duplicate whole bars, crossfaded splices, save as a new file.
-- [ ] Automatic BPM and downbeat detection (beat_this) to pre-fill the grid; see
+- [x] Automatic BPM and downbeat detection (beat_this): **Detect** in Cut Bars; see
   [docs/beat-this-plan.md](docs/beat-this-plan.md).
+- [ ] Compare Detect with hand-set grids on more real tracks, especially the downbeat
+  on breaks; consider detecting upcoming tracks in the background while sorting.
 - [x] Metronome click over editor playback to check the grid by ear; tap tempo.
 - [x] Persist recorded grids and memory cues across launches (Rekordbox records).
 - [ ] Persist unsaved edits and undo history across launches.
@@ -543,7 +564,8 @@ verification was performed for this feature; disposable-copy checks remain requi
 
 ## Tests
 
-Run `.venv/bin/python -m unittest -v`. Tests use temporary files only, including the
+Run `.venv/bin/python -m unittest -v`. The beat_this model test runs only after
+`zsh build.sh --detect`; the grid fitting is tested without it. Tests use temporary files only, including the
 record store (the native tests point `AUDIO_SORTER_SUPPORT` at a temporary folder)
 and every rekordbox XML they write. FFmpeg is
 needed for real-audio packet-preservation, native playback, and MP3 edit tests;

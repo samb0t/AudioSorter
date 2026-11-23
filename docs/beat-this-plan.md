@@ -1,6 +1,8 @@
 # Plan: automatic grid detection with beat_this
 
-Status: planned, not built. Decisions agreed: detection runs only when asked (a Detect
+Status: built (see the README). Measured on a 6.7-minute breaks track: 8.6 s on an M1
+Pro's CPU, 125 BPM as set by hand; Apple's MPS backend was no faster, so the CPU is
+used. Decisions agreed: detection runs only when asked (a Detect
 button), its result is applied directly as the grid (downbeat set), the model is
 `final0`, and installing PyTorch into the app's `.venv` is fine.
 
@@ -51,10 +53,11 @@ A new helper module, called as `comments.py detect <wav>`, returns
 `{"bpm", "anchor", "confidence", "drift", "beats", "downbeats"}`:
 
 1. **Run the model** on the decoded WAV with `final0`, without the DBN.
-2. **Tempo**: take the median beat interval, number each beat by rounding against it
-   (so missed or extra beats don't shift later numbers), then fit beat time against
-   beat number with a least-squares line, dropping beats more than 40 ms off and
-   refitting. The slope gives the BPM.
+2. **Tempo**: average the ordinary beat intervals (within 10% of the median), number
+   each beat by rounding against that (so missed or extra beats don't shift later
+   numbers), then fit beat time against beat number with a least-squares line,
+   dropping beats more than 40 ms off and refitting. The slope gives the BPM. If fewer
+   than half the beats fit, there is no steady tempo and detection says so.
 3. **Prefer round tempos**: if the nearest whole BPM (then half BPM) fits the beats
    almost as well (RMS within 1 ms of the free fit), use it. Electronic music is
    usually produced at a whole BPM, and a rounded value matches the BPM tag written
@@ -63,7 +66,7 @@ A new helper module, called as `comments.py detect <wav>`, returns
    most common position mod 4. The margin over the runner-up is the downbeat
    confidence.
 5. **Fine phase**: the 20 ms frames limit the line's offset. Refine it by sliding the
-   whole grid within ±15 ms to maximise the sum of an onset envelope (rectified
+   whole grid within ±25 ms to maximise the sum of an onset envelope (rectified
    high-passed energy rise, computed with numpy on the same WAV) at beat positions,
    weighted towards downbeats. This lands the lines on kick attacks.
 6. **Anchor**: return the downbeat nearest the middle of the track, so rounding the
@@ -74,9 +77,8 @@ A new helper module, called as `comments.py detect <wav>`, returns
 
 ## 4. In the editor
 
-- A **Detect** button in the grid row (no key yet). It runs in the background with a
-  spinner and the status line "Detecting beats…"; a second press or opening another
-  track cancels it (the helper process is terminated).
+- A **Detect** button in the grid row (no key yet). It runs in the background, the
+  button reads "Detecting…", and the status line says "Detecting beats…".
 - On success it applies the grid as if typed and placed: `tempoSet` and `downbeatSet`
   become true, and the selection, cues and edits are remapped exactly as for ⌘\ (one
   undoable step, so ⌘Z returns to the previous grid). The status line reports, for
@@ -86,9 +88,11 @@ A new helper module, called as `comments.py detect <wav>`, returns
   says so, and suggests ÷2/×2 or ⌘\ on the first kick.
 - Detection never writes tags or records anything: saving, sorting and ⌘S/⌘⇧S work as
   now.
-- Grid changes are not on the edit undo stack today; detection adds a grid entry to
-  it, so that part of the stack needs a small extension (pieces, cues and grid
-  snapshots together).
+- Grid changes are not on the edit undo stack (edits and cues follow the grid by bar
+  number instead). Detection keeps the whole session from before it, and ⌘Z restores
+  that while the undo stack is back where detection left it and the grid hasn't been
+  changed since. A second press while detecting does nothing; opening another track
+  or closing the editor abandons the result.
 
 ## 5. Tests
 
