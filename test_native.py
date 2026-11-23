@@ -1219,7 +1219,7 @@ sorter.configuration = try JSONDecoder().decode(Configuration.self, from: JSONSe
 sorter.loadFolder(root, autoplay: false)
 let original = root.appendingPathComponent("Café & Co #1.wav")
 let edit = root.appendingPathComponent("Café & Co #1 - Edit.wav")
-assert(sorter.files.map(\.lastPathComponent) == [original.lastPathComponent, "Plain.wav"])
+assert(sorter.files.map(\.lastPathComponent) == [original.lastPathComponent, "Plain.wav", "Third.wav"])
 func exported() -> [String: XMLElement] {
     settle { !sorter.exporting }
     if case .failure(let error) = sorter.exportResult { fatalError("export failed: \(error)") }
@@ -1385,6 +1385,32 @@ sorter.undoMove()
 let kept = sorter.gridStore.record(for: plain)!
 assert(kept.hasGrid && kept.anchor == 0.5 && kept.trackID == recordedID && sorter.gridStore.record(for: sortedPlain) == nil)
 assert(Set(exported().keys) == [plain.path])
+
+// Sorting records the grid and cues set in Cut Bars, as ⌘⇧S would, without pressing it.
+let third = root.appendingPathComponent("Third.wav"), sortedThird = root.appendingPathComponent("dest/House/Third.wav")
+sorter.refreshFolder()
+select(third)
+editor.open(sorter.files[sorter.index])
+editor.playhead = 0.5
+editor.setDownbeat()
+editor.playhead = 2.5
+editor.addCue()
+editor.window?.close()
+assert(sorter.gridStore.record(for: third) == nil && editor.session.unsaved)
+sorter.move(0)
+let thirdRecord = sorter.gridStore.record(for: sortedThird)!
+assert(thirdRecord.anchor == 0.5 && near(thirdRecord.cues, [2.5]) && thirdRecord.day == GridStore.today())
+assert(sorter.status.stringValue.contains("Recorded its grid and 1 memory cue for Rekordbox."), sorter.status.stringValue)
+assert(starts(exported()[sortedThird.path]!) == ["2.500"])
+// The editor session moved with the file and counts as saved, so quitting doesn't warn.
+assert(sorter.unsavedEdits().isEmpty)
+editor.open(sortedThird)
+assert(editor.status.stringValue.hasSuffix("Restored this track's grid.") && near(editor.session.cueTimes(editor.duration), [2.5]))
+editor.window?.close()
+// Undo moves record and session back together.
+sorter.undoMove()
+assert(sorter.gridStore.record(for: third)?.anchor == 0.5 && sorter.gridStore.record(for: sortedThird) == nil)
+assert(sorter.editSessions.keys.contains { GridStore.key($0) == GridStore.key(third) })
 '''
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1393,7 +1419,7 @@ assert(Set(exported().keys) == [plain.path])
             for i in range(rate * 6):
                 sample = int(20000 * math.sin(2 * math.pi * 220 * i / rate))
                 frames += struct.pack("<hh", sample, sample)
-            for name in ("Café & Co #1.wav", "Plain.wav"):
+            for name in ("Café & Co #1.wav", "Plain.wav", "Third.wav"):
                 with wave.open(str(root / name), "wb") as output:
                     output.setnchannels(2)
                     output.setsampwidth(2)

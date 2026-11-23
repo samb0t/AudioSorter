@@ -399,6 +399,48 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         exportRekordbox()
     }
 
+    // What ⌘⇧S records for an original: the session's grid, with its cues mapped back to where
+    // they play in the original. Returns how many cues were recorded and how many were left out.
+    func recordOriginal(_ url: URL, session: EditSession, rate: Double, frames: Int64) throws -> (cues: Int, dropped: Int) {
+        let timeline = EditTimeline(session: session, rate: rate, frames: frames)
+        let duration = Double(frames) / rate
+        let mapped = session.cueTimes(duration).map { timeline.uniqueSourceTime($0) }
+        let cues = mapped.compactMap { $0 }
+        try recordGrid(url, grid: session.grid, cues: cues, duration: duration, sampleRate: rate)
+        return (cues.count, mapped.count - cues.count)
+    }
+
+    static func droppedNote(_ dropped: Int) -> String {
+        guard dropped > 0 else { return "" }
+        return " Left out \(dropped) cue\(dropped == 1 ? "" : "s") in duplicated audio, which has no single place in the original; save the edit (⌘S) to keep \(dropped == 1 ? "it" : "them")."
+    }
+
+    // Sorting a track whose downbeat was set in Cut Bars records its grid and cues, as ⌘⇧S
+    // would: sending it to a folder is the sign the work on it is done.
+    func recordSession(for url: URL) -> String {
+        editorController?.storeSession()
+        guard var session = editSessions[url], session.downbeatSet else { return "" }
+        do {
+            let file = try AVAudioFile(forReading: url)
+            let recorded = try recordOriginal(url, session: session, rate: file.processingFormat.sampleRate, frames: file.length)
+            session.savedCues = session.cues
+            editSessions[url] = session
+            if editorController?.url == url { editorController?.session.savedCues = session.cues }
+            return " Recorded its grid and \(recorded.cues) memory cue\(recorded.cues == 1 ? "" : "s") for Rekordbox." + Self.droppedNote(recorded.dropped)
+        } catch {
+            return " Grid not recorded for Rekordbox: \(error.localizedDescription)"
+        }
+    }
+
+    // The editor's session for a file follows it when the app moves it.
+    func moveSession(from old: URL, to new: URL) {
+        if let session = editSessions.removeValue(forKey: old) { editSessions[new] = session }
+        if editorController?.url == old {
+            editorController?.url = new
+            editorController?.window?.title = "Cut Bars — \(new.lastPathComponent)"
+        }
+    }
+
     // Keeps a record on its file when the app moves or trashes it. A failure is reported
     // after the move, never blocking it; the record then shows as missing.
     func updateRecords(_ change: () throws -> Bool) -> String {
@@ -879,9 +921,11 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
             try FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
             let genre = configuration.destinations[destination].genre
             let recordKey = GridStore.key(original)
+            let sessionNote = recordSession(for: original)
             let restore = try moveTaggedFile(from: original, to: target, change: genre.map { ["genre": $0] })
             undoMoves.append((original, target, restore))
-            let recordNote = updateRecords {
+            moveSession(from: original, to: target)
+            let recordNote = sessionNote + updateRecords {
                 if try gridStore.sorted(from: recordKey, to: target) { sortRecords.insert(GridStore.key(target)) }
                 return true
             }
@@ -911,6 +955,7 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
             let recordKey = GridStore.key(last.to)
             _ = try moveTaggedFile(from: last.to, to: last.from, change: last.genreRestore)
             undoMoves.removeLast()
+            moveSession(from: last.to, to: last.from)
             let recordNote = updateRecords {
                 // A grid recorded since the sort stays with the file.
                 guard sortRecords.remove(recordKey) != nil, gridStore.contents.tracks[recordKey]?.hasGrid == false else {
@@ -3438,11 +3483,9 @@ final class EditorController: NSWindowController, NSWindowDelegate {
             NSSound.beep()
             return
         }
-        let timeline = timeline
-        let mapped = session.cueTimes(duration).map { timeline.uniqueSourceTime($0) }
-        let cues = mapped.compactMap { $0 }, dropped = mapped.count - cues.count
+        let recorded: (cues: Int, dropped: Int)
         do {
-            try sorter.recordGrid(url, grid: session.grid, cues: cues, duration: duration, sampleRate: rate)
+            recorded = try sorter.recordOriginal(url, session: session, rate: rate, frames: frames)
         } catch {
             status.stringValue = "Not recorded: \(error.localizedDescription)"
             NSSound.beep()
@@ -3451,11 +3494,7 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         session.savedCues = session.cues
         refresh()
         let grid = session.grid
-        var message = "Recorded \(url.lastPathComponent) for Rekordbox: BPM \(format(grid.bpm)), bar 1 at \(stamp(grid.barTime(grid.firstBar))), \(cues.count) memory cue\(cues.count == 1 ? "" : "s"). The audio file is unchanged."
-        if dropped > 0 {
-            message += " Left out \(dropped) cue\(dropped == 1 ? "" : "s") in duplicated audio, which has no single place in the original; save the edit (⌘S) to keep \(dropped == 1 ? "it" : "them")."
-        }
-        status.stringValue = message
+        status.stringValue = "Recorded \(url.lastPathComponent) for Rekordbox: BPM \(format(grid.bpm)), bar 1 at \(stamp(grid.barTime(grid.firstBar))), \(recorded.cues) memory cue\(recorded.cues == 1 ? "" : "s"). The audio file is unchanged." + Sorter.droppedNote(recorded.dropped)
     }
 
     func windowWillClose(_ notification: Notification) {

@@ -260,7 +260,8 @@ can put the playhead on the first kick.
 | Esc | Stop (or leave the BPM/bars field without applying) |
 
 Grid, edits, cues, and undo history are remembered per track until the app quits, so
-closing the editor never loses anything. Unsaved edits show as "• unsaved" in the
+closing the editor never loses anything; moving a track with 1–9 (or undoing the
+move) takes its session along. Unsaved edits show as "• unsaved" in the
 editor and as the dot in its close button. Quitting (or closing the main window)
 with unsaved edits or cue changes lists the affected tracks and asks first, with
 Cancel as the default. Grid-only changes (BPM, downbeat) don't count as unsaved. Edits
@@ -313,15 +314,17 @@ import that day's tracks from the XML (no Import Folder for sorted tracks). Trac
 already in your Rekordbox library never appear in the XML.
 
 **What goes into the XML.**
-- **Sorting a track** with 1–9 adds it, without a grid: Rekordbox analyses it on
-  import like any new track. Undoing the move (⌘Z) takes it out again.
+- **Sorting a track** with 1–9 adds it. If you set its downbeat in Cut Bars, sorting
+  also records the grid and memory cues you set there, exactly as ⌘⇧S would; otherwise
+  it goes in without a grid and Rekordbox analyses it on import like any new track.
+  Undoing the move (⌘Z) takes it out again, keeping any grid that was recorded.
 - A **recorded grid** adds the grid and memory cues, but only once the downbeat is set
   (⌘\\ or D), because Rekordbox's bar 1 comes from it:
 - **⌘S** in Cut Bars saves an edit and records the *edit file*: the edited track's
   grid and its cues at save time. Without a downbeat the edit is still saved, just
   not recorded; open the edit, set the downbeat and press ⌘⇧S.
-- **⌘⇧S** (**Save grid & cues**) records the *original*: its grid, plus its cues
-  mapped back to where they play in the original. Cues in duplicated audio have no
+- **⌘⇧S** (**Save grid & cues**) records the *original* right away, without sorting
+  it: its grid, plus its cues mapped back to where they play in the original. Cues in duplicated audio have no
   single place in the original, so they are left out and the status line says how
   many; save the edit to keep them. The audio file is not changed.
 
