@@ -366,9 +366,9 @@ collection. Do you want to load information in the tag of the library being
 imported? Beat Grid and Key information will not be loaded if the track is set
 locked out against analyzing." In the test:
 - **Yes** replaces the track's data with the XML's: the grid and memory cues are
-  updated, and **hot cues, the rating and (presumably) colour and My Tags are wiped**,
-  because the XML doesn't carry them. Memory cues you added in Rekordbox are most
-  likely replaced too.
+  updated, memory cues you added in Rekordbox are replaced, and **hot cues and the
+  rating are wiped** (presumably colour and My Tags too), because the XML doesn't
+  carry them.
 - **No** leaves the track as it was.
 
 So import each track once, after setting its grid here, and only answer Yes for a
