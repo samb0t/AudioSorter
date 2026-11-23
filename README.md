@@ -527,7 +527,8 @@ verification was performed for this feature; disposable-copy checks remain requi
 
 - [x] Cut Bars editor: manual BPM/downbeat grid, zoom to sample level, cut and
   duplicate whole bars, crossfaded splices, save as a new file.
-- [ ] Automatic BPM and downbeat detection (beat_this) to pre-fill the grid.
+- [ ] Automatic BPM and downbeat detection (beat_this) to pre-fill the grid; see
+  [docs/beat-this-plan.md](docs/beat-this-plan.md).
 - [x] Metronome click over editor playback to check the grid by ear; tap tempo.
 - [x] Persist recorded grids and memory cues across launches (Rekordbox records).
 - [ ] Persist unsaved edits and undo history across launches.
