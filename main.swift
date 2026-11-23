@@ -2046,7 +2046,7 @@ struct EditSession {
     mutating func addCue(at time: Double, duration: Double) throws {
         let output = outputGrid(duration)
         guard cueTimes(duration).allSatisfy({ abs($0 - time) >= 0.001 }) else { throw EditError("There is already a cue here.") }
-        guard cues.count < Self.cueLimit else { throw EditError("Rekordbox keeps at most \(Self.cueLimit) memory cues per track. Remove one first (⇧C).") }
+        guard cues.count < Self.cueLimit else { throw EditError("Rekordbox keeps at most \(Self.cueLimit) memory cues per track. Remove one first (⇧M).") }
         remember()
         cues.append((time - output.anchor) / output.beatDuration)
         cues.sort()
@@ -2685,7 +2685,7 @@ final class EditorController: NSWindowController, NSWindowDelegate {
     let cutButton = NSButton(title: "Cut  X", target: nil, action: nil)
     let duplicateButton = NSButton(title: "Duplicate  ⌘D", target: nil, action: nil)
     let snapButton = NSButton(checkboxWithTitle: "Snap (⌘-click: free)", target: nil, action: nil)
-    let clickButton = NSButton(checkboxWithTitle: "Click  M", target: nil, action: nil)
+    let clickButton = NSButton(checkboxWithTitle: "Click  K", target: nil, action: nil)
     let writeBPMButton = NSButton(title: "Write BPM to tag", target: nil, action: nil)
     let cueLabel = NSTextField(labelWithString: "")
     let recordButton = NSButton(title: "Save grid & cues  ⌘⇧S", target: nil, action: nil)
@@ -2742,7 +2742,7 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         bpmField.widthAnchor.constraint(equalToConstant: 80).isActive = true
         let gridRow = NSStackView(views: [
             NSTextField(labelWithString: "BPM"), bpmField, button("Tap  T", #selector(tapPressed)), button("÷2", #selector(halveTempo)), button("×2", #selector(doubleTempo)), writeBPMButton,
-            button("Downbeat at playhead  D", #selector(setDownbeat)),
+            button("Downbeat at playhead  ⌘\\", #selector(setDownbeat)),
             button("◀ 1 ms  ,", #selector(nudgeEarlier)), button("1 ms ▶  .", #selector(nudgeLater)), snapButton
         ])
         writeBPMButton.target = self
@@ -2773,14 +2773,14 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         recordButton.target = self
         recordButton.action = #selector(saveGridAndCues)
         let cueRow = NSStackView(views: [
-            button("Memory cue  C", #selector(addCue)), button("Remove nearest  ⇧C", #selector(removeCue)),
+            button("To nearest beat  C", #selector(cueToNearestBeat)), button("Memory cue  M", #selector(addCue)), button("Remove nearest  ⇧M", #selector(removeCue)),
             button("◀ Cue  [", #selector(previousCue)), button("Cue ▶  ]", #selector(nextCue)), cueLabel, recordButton
         ])
         cueRow.spacing = 8
         content.addArrangedSubview(cueRow)
         status.textColor = .secondaryLabelColor
         content.addArrangedSubview(status)
-        let help = NSTextField(wrappingLabelWithString: "Click to place the playhead • Scroll to move • Pinch, ⌘/⌥-scroll or = / − to zoom, 0 fits • ⌥-drag slides the grid • ← / → beat, ⇧ bar • Shift+, / . nudges 10 ms • T taps tempo • M click • C cue • Esc stops")
+        let help = NSTextField(wrappingLabelWithString: "Click to place the playhead • Scroll to move • Pinch, ⌘/⌥-scroll or = / − to zoom, 0 fits • ⌥-drag slides the grid • ← / → beat, ⇧ bar • C nearest beat • Shift+, / . nudges 10 ms • T taps tempo • K click • Esc stops")
         help.textColor = .tertiaryLabelColor
         help.font = .systemFont(ofSize: 11)
         content.addArrangedSubview(help)
@@ -2988,6 +2988,7 @@ final class EditorController: NSWindowController, NSWindowDelegate {
             case "s": flags.contains(.shift) ? saveGridAndCues() : save(); return true
             case "d": duplicateSelection(); return true
             case "z": flags.contains(.shift) ? redoEdit() : undoEdit(); return true
+            case "\\": setDownbeat(); return true  // Rekordbox's key for it; D works too.
             default: return false
             }
         }
@@ -3012,12 +3013,14 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         case "0", ")": waveform.fit(); return true
         case "d": setDownbeat(); return true
         case "t": tapPressed(); return true
-        case "m": clickButton.state = clickButton.state == .on ? .off : .on; clickChanged(); return true
+        case "k": clickButton.state = clickButton.state == .on ? .off : .on; clickChanged(); return true
         case "i": setSelectionStart(); return true
         case "o": setSelectionEnd(); return true
         case "p": previewSelection(); return true
         case "x": cutSelection(); return true
-        case "c": shift ? removeCue() : addCue(); return true
+        // Rekordbox's keys: C is CUE with quantize, M stores a memory cue.
+        case "c": cueToNearestBeat(); return true
+        case "m": shift ? removeCue() : addCue(); return true
         case "[", "{": previousCue(); return true
         case "]", "}": nextCue(); return true
         case ",", "<": nudge(shift ? -0.01 : -0.001); return true
@@ -3281,7 +3284,7 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         do {
             try session.addCue(at: time, duration: duration)
             refresh()
-            status.stringValue = "Memory cue at \(position(time)). ⇧C removes the nearest cue; [ and ] jump between cues."
+            status.stringValue = "Memory cue at \(position(time)). ⇧M removes the nearest cue; [ and ] jump between cues."
         } catch {
             status.stringValue = error.localizedDescription
             NSSound.beep()
@@ -3303,6 +3306,14 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         let times = session.cueTimes(duration)
         guard let target = direction > 0 ? times.first(where: { $0 > playhead + 1e-4 }) : times.last(where: { $0 < playhead - 1e-4 }) else { NSSound.beep(); return }
         seek(to: target)
+        waveform.follow(playhead)
+    }
+
+    // Like Rekordbox's CUE with quantize on: stop, and put the playhead on the nearest beat.
+    @objc func cueToNearestBeat() {
+        if playing { stopAndKeepPosition() }
+        let grid = timeline.grid
+        seek(to: grid.anchor + ((playhead - grid.anchor) / grid.beatDuration).rounded() * grid.beatDuration)
         waveform.follow(playhead)
     }
 

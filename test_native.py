@@ -1567,7 +1567,7 @@ assert(editor.metronome.snapshot.end == editor.timeline.duration && editor.metro
 editor.clickButton.state = .off
 editor.clickChanged()
 assert(!editor.metronome.snapshot.enabled)
-// Memory cue keys: C adds at the playhead, ⇧C removes the nearest, [ and ] jump, ⌘Z undoes.
+// Rekordbox's keys: M stores a memory cue, ⇧M removes the nearest, [ and ] jump, ⌘Z undoes.
 func key(_ characters: String, _ code: UInt16, _ flags: NSEvent.ModifierFlags = []) -> Bool {
     let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0, windowNumber: editor.window!.windowNumber,
                                  context: nil, characters: characters, charactersIgnoringModifiers: characters, isARepeat: false, keyCode: code)!
@@ -1577,18 +1577,27 @@ func near(_ a: [Double], _ b: [Double]) -> Bool { a.count == b.count && zip(a, b
 editor.window?.makeFirstResponder(editor.waveform)
 assert(editor.session.cues.isEmpty && editor.cueLabel.stringValue == "0/10 memory cues")
 editor.playhead = 0.6
-assert(key("c", 8))
+assert(key("m", 46))
 editor.playhead = 1.8
-assert(key("c", 8))
+assert(key("m", 46))
 assert(near(editor.waveform.cues, [0.6, 1.8]) && editor.overview.cues == editor.waveform.cues && editor.cueLabel.stringValue == "2/10 memory cues")
 assert(editor.status.stringValue.hasPrefix("Memory cue at bar 1.4"), editor.status.stringValue)
 editor.playhead = 0
 assert(key("]", 30) && abs(editor.playhead - 0.6) < 1e-9 && key("]", 30) && abs(editor.playhead - 1.8) < 1e-9)
 assert(key("[", 33) && abs(editor.playhead - 0.6) < 1e-9)
 editor.playhead = 1.7
-assert(key("C", 8, .shift) && near(editor.waveform.cues, [0.6]))
+assert(key("M", 46, .shift) && near(editor.waveform.cues, [0.6]))
 assert(key("z", 6, .command) && near(editor.waveform.cues, [0.6, 1.8]))
 assert(editor.session.unsaved && editor.window?.isDocumentEdited == true)
+// C is Rekordbox's CUE with quantize: the playhead moves to the nearest beat (0.6 s at 100 BPM).
+editor.playhead = 0.83
+assert(key("c", 8) && abs(editor.playhead - 0.6) < 1e-9)
+editor.playhead = 0.95
+assert(key("c", 8) && abs(editor.playhead - 1.2) < 1e-9 && editor.session.cues.count == 2)
+// K toggles the metronome; ⌘\ sets the downbeat, like D.
+assert(key("k", 40) && editor.metronome.snapshot.enabled && key("k", 40) && !editor.metronome.snapshot.enabled)
+editor.playhead = 0.3
+assert(key("\\", 42, .command) && editor.status.stringValue.hasPrefix("Downbeat set at 0:00.300"), editor.status.stringValue)
 '''
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

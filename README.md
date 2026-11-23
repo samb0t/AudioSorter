@@ -183,9 +183,9 @@ an editor for removing or repeating whole bars, the way you would in Ableton:
    and most stores set one); otherwise type it, or tap **T** (or **Tap**) along with
    the beat: after four taps the BPM becomes the running average, to 0.1 BPM, and
    a 2-second pause starts over. Tapping sets tempo only, not the downbeat. Zoom in on the first kick, click to
-   put the playhead on it, and press **D** to make it a downbeat. Then check bar
-   lines late in the track. If they drift off the kicks, fine-tune the BPM (decimals
-   are fine). Turn on **Click** (**M**) to hear a metronome on every beat, accented
+   put the playhead on it (or press **C** for the nearest beat), and press **⌘\\**
+   (or **D**) to make it a downbeat. Then check bar lines late in the track. If they drift off the kicks, fine-tune the BPM (decimals
+   are fine). Turn on **Click** (**K**) to hear a metronome on every beat, accented
    on downbeats, and listen for flamming against the kicks. The click is generated
    live in sync with playback (measured within 0.1 ms) and follows the edited track
    across splices. On an unedited track, BPM changes, taps, and nudges are heard
@@ -211,10 +211,12 @@ an editor for removing or repeating whole bars, the way you would in Ableton:
    original itself in Rekordbox with this grid and cues. See
    [Exporting to Rekordbox](#exporting-to-rekordbox).
 
-**Memory cues.** **C** adds a memory cue at the playhead: green markers on the
-waveform and the overview strip, with the count beside the cue buttons. A stopped
+**Memory cues.** The keys follow Rekordbox's: **C** moves the playhead to the nearest
+beat (like CUE with Quantize on), and **M** stores a memory cue at the playhead. Cues
+show as green markers on the waveform and the overview strip, with the count beside
+the cue buttons. A stopped
 playhead is already where your click or arrow key put it (snapped or ⌘-click free);
-while playing, the cue snaps to the nearest beat when snapping is on. **⇧C** removes
+while playing, the cue snaps to the nearest beat when snapping is on. **⇧M** removes
 the cue nearest the playhead, and **[** / **]** jump to the previous/next cue. Cue
 changes share the undo stack with edits. A track holds at most 10 cues, the number
 Rekordbox's MEMORY CUE panel keeps. Cues belong to the edited track and move with
@@ -239,16 +241,17 @@ can put the playhead on the first kick.
 | Scroll / swipe | Move along the track |
 | Pinch, ⌘/⌥-scroll, = / − | Zoom (down to individual samples); 0 fits the track |
 | Overview strip | Click or drag to jump |
-| D | Downbeat at playhead |
+| ⌘\\ or D | Downbeat at playhead (⌘\\ as in Rekordbox) |
 | T | Tap tempo |
-| M | Metronome click on/off (remembered) |
+| K | Metronome click on/off (remembered) |
 | , / . | Nudge grid 1 ms earlier/later; Shift: 10 ms |
 | ⌥-drag | Slide the grid |
 | I / O | Selection start/end at the nearest bar line |
 | X or Delete | Cut selection |
 | ⌘D | Duplicate selection |
-| C | Add a memory cue at the playhead |
-| ⇧C | Remove the memory cue nearest the playhead |
+| C | Playhead to the nearest beat (Rekordbox's CUE with Quantize) |
+| M | Store a memory cue at the playhead (as in Rekordbox) |
+| ⇧M | Remove the memory cue nearest the playhead |
 | [ / ] | Jump to the previous/next memory cue |
 | ⌘Z / ⌘⇧Z | Undo/redo edits and cue changes |
 | P | Play into the selection |
