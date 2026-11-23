@@ -1538,6 +1538,26 @@ editor.open(other)
 sorter.hold!.signal()
 RunLoop.main.run(until: Date().addingTimeInterval(0.3))
 assert(!editor.detecting && !editor.session.tempoSet && editor.url == other)
+// ⌥← / ⌥→ move bar 1 by a beat (arrow keys carry the numeric-pad and function flags); cues stay put.
+func key(_ code: UInt16, _ flags: NSEvent.ModifierFlags) -> Bool {
+    let arrow = String(UnicodeScalar(code == 123 ? 0xF702 : 0xF703)!)
+    let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0, windowNumber: editor.window!.windowNumber,
+                                 context: nil, characters: arrow, charactersIgnoringModifiers: arrow, isARepeat: false, keyCode: code)!
+    return editor.handle(event)
+}
+editor.bpmField.stringValue = "125"
+editor.bpmEntered()
+editor.playhead = 0.3
+editor.setDownbeat()
+editor.window?.makeFirstResponder(editor.waveform)
+editor.playhead = 1.5
+editor.addCue()
+assert(key(124, [.option, .numericPad, .function]) && abs(editor.session.grid.anchor - 0.78) < 1e-9)
+assert(editor.status.stringValue.hasPrefix("Bar 1 moved one beat later: now at 0:00.780"), editor.status.stringValue)
+assert(key(123, [.option, .numericPad, .function]) && key(123, [.option, .numericPad, .function]) && abs(editor.session.grid.anchor + 0.18) < 1e-9)
+assert(abs(editor.session.cueTimes(editor.duration)[0] - 1.5) < 1e-9 && editor.detectUndo == nil)
+// Without ⌥ the arrows still step by beats.
+assert(key(124, [.numericPad, .function]) && abs(editor.session.grid.anchor + 0.18) < 1e-9 && abs(editor.playhead - 1.74) < 1e-9)
 '''
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

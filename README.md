@@ -195,7 +195,9 @@ an editor for removing or repeating whole bars, the way you would in Ableton:
    10 s for a 6-minute track, in the background). The grid is applied straight away
    and the status line says how well it fits: the share of beats on the grid, and a
    warning if the downbeat is uncertain or the tempo drifts. Check bar 1 and a late
-   bar with the click, and fix anything below as usual; ⌘Z right after Detect (before
+   bar with the click. On breaks and jungle the tempo is usually right but bar 1 can
+   be a beat or two out: **⌥←** / **⌥→** move it one beat at a time. Fix anything else
+   as usual; ⌘Z right after Detect (before
    changing the grid again) returns to the grid from before. Detection prefers a whole
    BPM when it fits as well, and lines the grid up with the attacks in the audio.
    Without detection, the BPM comes from the file's BPM tag when present (Beatport
@@ -264,6 +266,7 @@ can put the playhead on the first kick.
 | Pinch, ⌘/⌥-scroll, ⌘= / ⌘− or = / − | Zoom (down to individual samples); ⌘0 or 0 fits the track |
 | Overview strip | Click or drag to jump |
 | ⌘\\ or D | Downbeat at playhead (⌘\\ as in Rekordbox) |
+| ⌥← / ⌥→ | Move bar 1 one beat earlier/later (cues stay on the audio) |
 | T | Tap tempo |
 | K | Metronome click on/off (remembered) |
 | , / . | Nudge grid 1 ms earlier/later; Shift: 10 ms |

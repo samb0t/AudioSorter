@@ -2882,7 +2882,7 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         content.addArrangedSubview(cueRow)
         status.textColor = .secondaryLabelColor
         content.addArrangedSubview(status)
-        let help = NSTextField(wrappingLabelWithString: "Click to place the playhead • Scroll to move • Pinch, ⌘/⌥-scroll or ⌘= / ⌘− to zoom, ⌘0 fits • ⌥-drag slides the grid • ← / → beat, ⇧ bar • C nearest beat • Shift+, / . nudges 10 ms • T taps tempo • K click • Esc stops")
+        let help = NSTextField(wrappingLabelWithString: "Click to place the playhead • Scroll to move • Pinch, ⌘/⌥-scroll or ⌘= / ⌘− to zoom, ⌘0 fits • ⌥-drag slides the grid • ⌥← / ⌥→ bar 1 by a beat • ← / → beat, ⇧ bar • C nearest beat • Shift+, / . nudges 10 ms • T taps tempo • K click • Esc stops")
         help.textColor = .tertiaryLabelColor
         help.font = .systemFont(ofSize: 11)
         content.addArrangedSubview(help)
@@ -3117,6 +3117,14 @@ final class EditorController: NSWindowController, NSWindowDelegate {
             if event.keyCode == 53 { refresh(); window.makeFirstResponder(waveform); return true }
             return false
         }
+        // ⌥← / ⌥→ move bar 1 by a beat: the quick fix when a detected downbeat is off.
+        if flags.subtracting([.numericPad, .function]) == .option {
+            switch event.keyCode {
+            case 123: shiftBarOne(-1); return true
+            case 124: shiftBarOne(1); return true
+            default: break
+            }
+        }
         guard !flags.contains(.control), !flags.contains(.option) else { return false }
         let shift = flags.contains(.shift)
         switch event.keyCode {
@@ -3330,6 +3338,17 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         if let selectionTime { session.selection = timeline.grid.nearestBar(to: selectionTime) }
         refresh()
         status.stringValue = "Downbeat set at \(stamp(playhead)). Check that later bar lines still sit on the kicks; adjust BPM if they drift."
+    }
+
+    // Moves every downbeat by whole beats; like ⌘\, cues stay where they are in the audio.
+    func shiftBarOne(_ beats: Int) {
+        guard tempoKnown() else { return }
+        let selectionTime = session.selection.map { timeline.grid.barTime($0) }
+        changeGrid(BeatGrid(bpm: session.grid.bpm, anchor: session.grid.anchor + Double(beats) * session.grid.beatDuration), remap: true, placed: true)
+        if let selectionTime { session.selection = timeline.grid.nearestBar(to: selectionTime) }
+        refresh()
+        let grid = timeline.grid
+        status.stringValue = "Bar 1 moved one beat \(beats < 0 ? "earlier" : "later"): now at \(stamp(grid.barTime(grid.firstBar))). ⌥← / ⌥→ move it again."
     }
 
     func nudge(_ seconds: Double) { changeGrid(BeatGrid(bpm: session.grid.bpm, anchor: session.grid.anchor + seconds), placed: true) }
