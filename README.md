@@ -208,7 +208,8 @@ an editor for removing or repeating whole bars, the way you would in Ableton:
    Once the downbeat is set, the save also records the edit's grid and cues for
    Rekordbox.
 6. **Record the original** (**⌘⇧S**, **Save grid & cues**) when you want the
-   original itself in Rekordbox with this grid and cues. See
+   original itself in Rekordbox with this grid and cues. On a track without audio
+   edits, plain **⌘S** does the same, and sorting it with 1–9 records it too. See
    [Exporting to Rekordbox](#exporting-to-rekordbox).
 
 **Memory cues.** The keys follow Rekordbox's: **C** moves the playhead to the nearest
@@ -255,7 +256,7 @@ can put the playhead on the first kick.
 | [ / ] | Jump to the previous/next memory cue |
 | ⌘Z / ⌘⇧Z | Undo/redo edits and cue changes |
 | P | Play into the selection |
-| ⌘S | Save edit (and record its grid and cues once the downbeat is set) |
+| ⌘S | Save edit (and record its grid and cues once the downbeat is set); without audio edits, same as ⌘⇧S |
 | ⌘⇧S | Save grid & cues: record the original's grid and cues for Rekordbox |
 | Esc | Stop (or leave the BPM/bars field without applying) |
 

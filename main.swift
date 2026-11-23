@@ -2762,7 +2762,7 @@ final class EditorController: NSWindowController, NSWindowDelegate {
     let editLabel = NSTextField(labelWithString: "")
     let status = NSTextField(wrappingLabelWithString: "")
     let playButton = NSButton(title: "Play  Space", target: nil, action: nil)
-    let saveButton = NSButton(title: "Save edit  ⌘S", target: nil, action: nil)
+    let saveButton = NSButton(title: "Save  ⌘S", target: nil, action: nil)
     let undoButton = NSButton(title: "Undo  ⌘Z", target: nil, action: nil)
     let redoButton = NSButton(title: "Redo  ⌘⇧Z", target: nil, action: nil)
     let cutButton = NSButton(title: "Cut  X", target: nil, action: nil)
@@ -3013,7 +3013,10 @@ final class EditorController: NSWindowController, NSWindowDelegate {
             ? "Record this file's grid and memory cues for the Rekordbox XML. The audio file is not changed."
             : "Set the downbeat (D) first: Rekordbox's bar 1 comes from it."
         window?.isDocumentEdited = session.unsaved
-        saveButton.isEnabled = session.edited && !saving
+        saveButton.isEnabled = (session.edited || session.downbeatSet) && !saving
+        saveButton.toolTip = session.edited
+            ? "Save the edit as a new file beside the original, and record its grid and cues for Rekordbox."
+            : "No audio edits: record this file's grid and cues for Rekordbox (same as ⌘⇧S)."
         writeBPMButton.isEnabled = taggedBPM != tagBPM && !saving
         writeBPMButton.toolTip = "Write \(format(tagBPM)) to the original's BPM tag (currently \(taggedBPM.map(format) ?? "none")). Saved edits get it automatically."
         undoButton.isEnabled = !session.undo.isEmpty
@@ -3407,7 +3410,12 @@ final class EditorController: NSWindowController, NSWindowDelegate {
 
     @objc func save() {
         guard !saving, let url else { return }
-        guard session.edited else { status.stringValue = "Nothing to save yet: cut or duplicate some bars first."; return }
+        // Without audio edits there is no new file to write; ⌘S records the grid and cues instead.
+        guard session.edited else {
+            if session.downbeatSet { saveGridAndCues() }
+            else { status.stringValue = "Nothing to save yet: set the downbeat (⌘\\) to record the grid and cues, or cut or duplicate some bars." }
+            return
+        }
         let output = sorter.editURL(for: url)
         guard !FileManager.default.fileExists(atPath: output.path) else {
             status.stringValue = "\(output.lastPathComponent) already exists. Move it to Trash or rename it, then save again."

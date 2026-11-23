@@ -1242,6 +1242,8 @@ sorter.editorController = editor
 editor.open(original)
 editor.saveGridAndCues()
 assert(editor.status.stringValue.hasPrefix("Set the downbeat") && !editor.recordButton.isEnabled)
+editor.save()
+assert(editor.status.stringValue.hasPrefix("Nothing to save yet: set the downbeat") && !editor.saveButton.isEnabled)
 assert(sorter.gridStore.contents.tracks.isEmpty && !FileManager.default.fileExists(atPath: storeURL.path))
 // 120 BPM, downbeat at 0.5 s: bars are 2 s. Cues at 1.0 and 4.5, then bar 2 (2.5–4.5 s) duplicated:
 // the cue at 4.5 follows to 6.5, and cues at 2.5 and in the copy (4.5) play duplicated audio.
@@ -1411,6 +1413,15 @@ editor.window?.close()
 sorter.undoMove()
 assert(sorter.gridStore.record(for: third)?.anchor == 0.5 && sorter.gridStore.record(for: sortedThird) == nil)
 assert(sorter.editSessions.keys.contains { GridStore.key($0) == GridStore.key(third) })
+
+// ⌘S on a track without audio edits records the grid and cues, like ⌘⇧S.
+editor.open(plain)
+assert(!editor.session.edited && editor.session.downbeatSet && editor.saveButton.isEnabled)
+editor.playhead = 3.0
+editor.addCue()
+editor.save()
+assert(near(sorter.gridStore.record(for: plain)!.cues, [3.0]) && !editor.session.unsaved)
+assert(editor.status.stringValue.hasPrefix("Recorded Plain.wav for Rekordbox"), editor.status.stringValue)
 '''
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
