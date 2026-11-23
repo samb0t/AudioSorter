@@ -141,8 +141,11 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(report["missing"], [str(missing)])
         self.assertEqual(report["failed"], [])
         self.assertEqual(report["cases"], {str(wav_path): "wav", str(lavc): "mp3-lavc", str(bare): "mp3-none", str(aiff): "aiff"})
-        nodes = root.find("PLAYLISTS")
-        self.assertEqual([node.attrib for node in nodes], [{"Type": "0", "Name": "ROOT", "Count": "0"}])
+        # Records without a day (from before playlists) share one playlist.
+        rootNode = root.find("PLAYLISTS/NODE")
+        self.assertEqual(rootNode.attrib, {"Type": "0", "Name": "ROOT", "Count": "1"})
+        self.assertEqual([node.get("Name") for node in rootNode.find("NODE")], ["Earlier"])
+        self.assertEqual(sorted(track.get("Key") for track in rootNode.iter("TRACK")), ["1", "2", "3", "4"])
         wav_track = tracks[str(wav_path)]
         self.assertEqual({key: wav_track.get(key) for key in ("TrackID", "Name", "Artist", "Genre", "Comments", "Kind", "SampleRate", "TotalTime", "AverageBpm")},
                          {"TrackID": "1", "Name": "Riff Title", "Artist": "Riff Artist", "Genre": "House", "Comments": "energy 7",
@@ -199,6 +202,31 @@ class ExportTests(unittest.TestCase):
         data[lame_tag:lame_tag + 4] = b"\0\0\0\0"
         damaged.write_bytes(data)
         self.assertEqual(rekordbox.decode_case(damaged), "mp3-xing")
+
+    def test_sorted_tracks_without_grid_and_daily_playlists(self):
+        wav_path, lavc, bare, aiff = self.fixtures()
+        store = {"tracks": {
+            str(wav_path): {"cues": [], "trackID": 1, "day": "2026-11-20"},
+            str(lavc): {"bpm": 124, "anchor": 0.5, "cues": [1.0], "trackID": 2, "day": "2026-11-22"},
+            str(bare): {"cues": [], "trackID": 3, "day": "2026-11-22"},
+            str(aiff): {"cues": [], "trackID": 4, "day": "2026-11-22", "trashed": True},
+            str(self.root / "gone.wav"): {"cues": [], "trackID": 5, "day": "2026-11-21"},
+        }}
+        root = parse(rekordbox.build_xml(store)[0])
+        tracks = {track.get("TrackID"): track for track in root.find("COLLECTION")}
+        # A sorted track without a grid has no TEMPO or cues, so Rekordbox analyses it.
+        self.assertEqual(list(tracks["1"]), [])
+        self.assertEqual((tracks["1"].get("AverageBpm"), tracks["1"].get("Name")), ("0.00", "Riff Title"))
+        self.assertEqual([child.tag for child in tracks["2"]], ["TEMPO", "POSITION_MARK"])
+        # One playlist per day, newest first; missing files are in neither collection nor playlists.
+        folder = root.find("PLAYLISTS/NODE/NODE")
+        self.assertEqual(folder.attrib, {"Type": "0", "Name": "Audio Sorter", "Count": "2"})
+        days = [(node.get("Name"), node.get("Type"), node.get("KeyType"), node.get("Entries"), [t.get("Key") for t in node])
+                for node in folder]
+        self.assertEqual(days, [("2026-11-22", "1", "0", "3", ["2", "3", "4"]), ("2026-11-20", "1", "0", "1", ["1"])])
+        self.assertEqual(set(tracks), {"1", "2", "3", "4"})
+        # Every playlist key is a TrackID in the collection.
+        self.assertTrue({t.get("Key") for t in folder.iter("TRACK")} <= set(tracks))
 
     def test_unreadable_track_is_reported_not_fatal(self):
         wav_path, *_ = self.fixtures()

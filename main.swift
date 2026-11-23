@@ -105,6 +105,8 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
     var exportPending = false
     // The last export's report from rekordbox.py (tracks, missing, failed), or why it failed.
     var exportResult: Result<[String: Any], Error>?
+    // Records that a sort created (by destination key): undoing that move removes them again.
+    var sortRecords = Set<String>()
     // Main-thread gate: existing sorting/comment/undo operations are synchronous.
     // Set before launching the worker, release only after every helper has exited.
     var repairingGenres = false
@@ -879,7 +881,10 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
             let recordKey = GridStore.key(original)
             let restore = try moveTaggedFile(from: original, to: target, change: genre.map { ["genre": $0] })
             undoMoves.append((original, target, restore))
-            let recordNote = updateRecords { try gridStore.move(from: recordKey, to: target) }
+            let recordNote = updateRecords {
+                if try gridStore.sorted(from: recordKey, to: target) { sortRecords.insert(GridStore.key(target)) }
+                return true
+            }
             let oldIndex = index
             files.remove(at: oldIndex)
             index = -1
@@ -906,7 +911,14 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
             let recordKey = GridStore.key(last.to)
             _ = try moveTaggedFile(from: last.to, to: last.from, change: last.genreRestore)
             undoMoves.removeLast()
-            let recordNote = updateRecords { try gridStore.move(from: recordKey, to: last.from) }
+            let recordNote = updateRecords {
+                // A grid recorded since the sort stays with the file.
+                guard sortRecords.remove(recordKey) != nil, gridStore.contents.tracks[recordKey]?.hasGrid == false else {
+                    return try gridStore.move(from: recordKey, to: last.from)
+                }
+                try gridStore.forget([recordKey])
+                return true
+            }
             invalidateGenres()
             // Only add it to this queue if it belongs to the current source scope.
             if let source, last.from.deletingLastPathComponent() == source || (recursive.state == .on && last.from.path.hasPrefix(source.path + "/")) {
@@ -1480,7 +1492,8 @@ final class RecordsController: NSWindowController, NSTableViewDataSource, NSTabl
         }
         table.reloadData()
         let missing = keys.filter { store.status($0) != .current }.count
-        var lines = ["\(keys.count) recorded track\(keys.count == 1 ? "" : "s") → \(sorter.rekordboxXML.path)"]
+        let grids = keys.filter { store.contents.tracks[$0]?.hasGrid == true }.count
+        var lines = ["\(keys.count) track\(keys.count == 1 ? "" : "s") (\(grids) with a recorded grid) → \(sorter.rekordboxXML.path)"]
         if let error = store.loadError { lines.append(error) }
         if missing > 0 { lines.append("\(missing) point\(missing == 1 ? "s" : "") to a missing or trashed file and \(missing == 1 ? "is" : "are") left out of the XML. Put the file back, or forget the record.") }
         switch sorter.exportResult {
@@ -1508,7 +1521,7 @@ final class RecordsController: NSWindowController, NSTableViewDataSource, NSTabl
         let text: String
         switch tableColumn?.identifier.rawValue {
         case "status": text = statusText(keys[row])
-        case "bpm": text = String(format: "%.2f", record.bpm)
+        case "bpm": text = record.bpm.map { String(format: "%.2f", $0) } ?? "—"
         case "cues": text = "\(record.cues.count)"
         default: text = keys[row]
         }
@@ -1756,17 +1769,23 @@ final class SettingsController: NSWindowController {
 
 // MARK: - Rekordbox records
 
-// A grid and memory cues recorded for one file, in seconds as AVFoundation decodes it
-// (the editor's timeline). rekordbox.py turns these into the rekordbox XML.
+// One file in the rekordbox XML: every track sorted with 1–9, plus any file whose grid was
+// recorded. Grids and memory cues are in seconds as AVFoundation decodes the file (the
+// editor's timeline); a sorted track without a grid has none, and Rekordbox analyses it.
+// rekordbox.py turns these into the XML.
 struct GridRecord: Codable, Equatable {
-    var bpm: Double
-    var anchor: Double  // Any downbeat.
+    var bpm: Double?
+    var anchor: Double?  // Any downbeat.
     var cues: [Double]
-    var trackID: Int    // Stable, so Rekordbox sees the same TrackID on every export.
-    var duration: Double
-    var sampleRate: Double
+    var trackID: Int     // Stable, so Rekordbox sees the same TrackID on every export.
+    var duration: Double?
+    var sampleRate: Double?
+    // The day (yyyy-MM-dd) it was sorted or its grid last recorded: the XML lists each
+    // day's tracks as a playlist, so new tracks can be imported without the old ones.
+    var day: String?
     // Set when the app moved the file to Trash; Finder's Put Back makes the record current again.
     var trashed: Bool?
+    var hasGrid: Bool { bpm != nil && anchor != nil }
 }
 
 // The persistent store: a small JSON file keyed by absolute path, replaced atomically.
@@ -1806,6 +1825,13 @@ final class GridStore {
 
     func record(for url: URL) -> GridRecord? { contents.tracks[Self.key(url)] }
 
+    static func today() -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: Date())
+    }
+
     func status(_ key: String) -> Status {
         if FileManager.default.fileExists(atPath: key) { return .current }
         return contents.tracks[key]?.trashed == true ? .trashed : .missing
@@ -1827,8 +1853,20 @@ final class GridStore {
         try commit { contents in
             let id = contents.tracks[key]?.trackID ?? contents.nextTrackID
             contents.nextTrackID = max(contents.nextTrackID, id + 1)
-            contents.tracks[key] = GridRecord(bpm: grid.bpm, anchor: grid.anchor, cues: cues.sorted(), trackID: id, duration: duration, sampleRate: sampleRate)
+            contents.tracks[key] = GridRecord(bpm: grid.bpm, anchor: grid.anchor, cues: cues.sorted(), trackID: id, duration: duration, sampleRate: sampleRate, day: Self.today())
         }
+    }
+
+    // A track sorted with 1–9: its record follows it, or a new one without a grid joins
+    // today's playlist. Returns whether a record was created, so undo can remove it again.
+    func sorted(from old: String, to new: URL) throws -> Bool {
+        if try move(from: old, to: new) { return false }
+        let key = Self.key(new)
+        try commit { contents in
+            contents.tracks[key] = GridRecord(cues: [], trackID: contents.nextTrackID, day: Self.today())
+            contents.nextTrackID += 1
+        }
+        return true
     }
 
     // Returns whether a record changed, so callers only regenerate the XML when needed.
@@ -2829,10 +2867,10 @@ final class EditorController: NSWindowController, NSWindowDelegate {
             session = remembered
             status.stringValue = remembered.edited ? "Restored this track's grid and edits." : "Restored this track's grid."
         }
-        else if let record = sorter.gridStore.record(for: url) {
-            session = EditSession(grid: BeatGrid(bpm: record.bpm, anchor: record.anchor))
+        else if let record = sorter.gridStore.record(for: url), let bpm = record.bpm, let anchor = record.anchor {
+            session = EditSession(grid: BeatGrid(bpm: bpm, anchor: anchor))
             session.downbeatSet = true
-            session.cues = record.cues.map { ($0 - record.anchor) / session.grid.beatDuration }
+            session.cues = record.cues.map { ($0 - anchor) / session.grid.beatDuration }
             session.savedCues = session.cues
             status.stringValue = "Restored the grid and \(record.cues.count) memory cue\(record.cues.count == 1 ? "" : "s") recorded for Rekordbox."
         }

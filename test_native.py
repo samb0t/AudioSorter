@@ -1219,7 +1219,7 @@ sorter.configuration = try JSONDecoder().decode(Configuration.self, from: JSONSe
 sorter.loadFolder(root, autoplay: false)
 let original = root.appendingPathComponent("Café & Co #1.wav")
 let edit = root.appendingPathComponent("Café & Co #1 - Edit.wav")
-assert(sorter.files.map(\.lastPathComponent) == [original.lastPathComponent])
+assert(sorter.files.map(\.lastPathComponent) == [original.lastPathComponent, "Plain.wav"])
 func exported() -> [String: XMLElement] {
     settle { !sorter.exporting }
     if case .failure(let error) = sorter.exportResult { fatalError("export failed: \(error)") }
@@ -1350,6 +1350,41 @@ assert(broken.loadError != nil)
 do { try broken.set(edit, grid: BeatGrid(bpm: 120, anchor: 0), cues: [], duration: 1, sampleRate: 44_100); fatalError("Expected refusal") } catch {}
 let damagedAfter = try String(contentsOf: damaged, encoding: .utf8)
 assert(damagedAfter == "{not json")
+
+// Sorting any track adds it to the XML without a grid, in today's playlist; undo takes it out.
+func select(_ url: URL) { sorter.select(sorter.files.firstIndex { GridStore.key($0) == GridStore.key(url) }!, autoplay: false) }
+let plain = root.appendingPathComponent("Plain.wav")
+let sortedPlain = root.appendingPathComponent("dest/House/Plain.wav")
+select(plain)
+sorter.move(0)
+let plainRecord = sorter.gridStore.record(for: sortedPlain)!
+assert(!plainRecord.hasGrid && plainRecord.cues.isEmpty && plainRecord.day == GridStore.today() && plainRecord.trackID == 3)
+tracks = exported()
+assert(Set(tracks.keys) == [sortedPlain.path] && tracks[sortedPlain.path]!.elements(forName: "TEMPO").isEmpty)
+let document = try XMLDocument(contentsOf: xmlURL)
+let playlist = try document.nodes(forXPath: "//NODE[@Name='Audio Sorter']/NODE[@Name='\(GridStore.today())']/TRACK") as! [XMLElement]
+assert(playlist.map { $0.attribute(forName: "Key")!.stringValue! } == ["3"])
+// The editor ignores a record without a grid.
+editor.open(sortedPlain)
+assert(!editor.session.downbeatSet && editor.session.cues.isEmpty)
+editor.window?.close()
+sorter.undoMove()
+assert(sorter.gridStore.record(for: plain) == nil && sorter.gridStore.record(for: sortedPlain) == nil)
+assert(exported().isEmpty)
+// A grid recorded after sorting stays with the file when the move is undone.
+sorter.refreshFolder()
+select(plain)
+sorter.move(0)
+editor.open(sortedPlain)
+editor.playhead = 0.5
+editor.setDownbeat()
+editor.saveGridAndCues()
+editor.window?.close()
+let recordedID = sorter.gridStore.record(for: sortedPlain)!.trackID
+sorter.undoMove()
+let kept = sorter.gridStore.record(for: plain)!
+assert(kept.hasGrid && kept.anchor == 0.5 && kept.trackID == recordedID && sorter.gridStore.record(for: sortedPlain) == nil)
+assert(Set(exported().keys) == [plain.path])
 '''
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1358,11 +1393,12 @@ assert(damagedAfter == "{not json")
             for i in range(rate * 6):
                 sample = int(20000 * math.sin(2 * math.pi * 220 * i / rate))
                 frames += struct.pack("<hh", sample, sample)
-            with wave.open(str(root / "Café & Co #1.wav"), "wb") as output:
-                output.setnchannels(2)
-                output.setsampwidth(2)
-                output.setframerate(rate)
-                output.writeframes(bytes(frames))
+            for name in ("Café & Co #1.wav", "Plain.wav"):
+                with wave.open(str(root / name), "wb") as output:
+                    output.setnchannels(2)
+                    output.setsampwidth(2)
+                    output.setframerate(rate)
+                    output.writeframes(bytes(frames))
             script = root / "main.swift"
             script.write_text(source + harness)
             helper = str(Path(__file__).with_name("comments.py"))

@@ -1,9 +1,11 @@
-"""Write the rekordbox XML for every track whose grid was recorded in the editor. Invoked through comments.py.
+"""Write the rekordbox XML for every track sorted or recorded in the app. Invoked through comments.py.
 
-The store (written by the app) maps absolute paths to a constant-tempo 4/4 grid and memory
-cues, in seconds as AVFoundation decodes the file. Rekordbox reads the XML through
+The store (written by the app) maps absolute paths to records: a constant-tempo 4/4 grid
+and memory cues, in seconds as AVFoundation decodes the file, or no grid for a track that
+was only sorted (Rekordbox analyses those itself). Rekordbox reads the XML through
 Preferences > Advanced > Database > rekordbox xml. Only memory cues are written (Num -1),
 never hot cues. Files that no longer exist are left out; the store keeps their records.
+Each day's tracks also form a playlist, so new tracks can be imported on their own.
 """
 import json
 import math
@@ -161,8 +163,8 @@ def track_element(path, record):
     case = decode_case(path)
     total, rate, bitrate = audio_info(path, record)
     offset = OFFSETS[case] / (rate or 44100)
-    bpm = round(record["bpm"], 2)  # Rekordbox keeps BPM to 0.01; the grid is exact at the downbeat.
-    inizio, battito = first_beat(bpm, record["anchor"] + offset)
+    grid = record.get("bpm") is not None and record.get("anchor") is not None
+    bpm = round(record["bpm"], 2) if grid else 0  # Rekordbox keeps BPM to 0.01; the grid is exact at the downbeat.
     tags = track_tags(path)
     attributes = {
         "TrackID": int(record["trackID"]),
@@ -176,7 +178,11 @@ def track_element(path, record):
         "Comments": tags["Comments"],
         "Location": location(path),
     }
+    if not grid:
+        # Sorted without a grid: no TEMPO, so Rekordbox analyses the track as usual.
+        return ["    <TRACK " + " ".join(f"{key}={attribute(value)}" for key, value in attributes.items()) + "/>"], case
     lines = ["    <TRACK " + " ".join(f"{key}={attribute(value)}" for key, value in attributes.items()) + ">"]
+    inizio, battito = first_beat(bpm, record["anchor"] + offset)
     lines.append(f'      <TEMPO Inizio="{seconds(inizio)}" Bpm="{bpm:.2f}" Metro="4/4" Battito="{battito}"/>')
     for cue in sorted(time + offset for time in record.get("cues", [])):
         if cue >= 0:
@@ -186,9 +192,21 @@ def track_element(path, record):
     return lines, case
 
 
+def playlists(days):
+    """An "Audio Sorter" folder with one playlist per day, newest first, keyed by TrackID."""
+    if not days:
+        return ['    <NODE Type="0" Name="ROOT" Count="0"/>']
+    lines = ['    <NODE Type="0" Name="ROOT" Count="1">', f'      <NODE Type="0" Name="Audio Sorter" Count="{len(days)}">']
+    for day in sorted(days, reverse=True):
+        lines.append(f'        <NODE Name={attribute(day)} Type="1" KeyType="0" Entries="{len(days[day])}">')
+        lines += [f'          <TRACK Key="{track}"/>' for track in days[day]]
+        lines.append("        </NODE>")
+    return lines + ["      </NODE>", "    </NODE>"]
+
+
 def build_xml(store, version="1.0"):
     """The XML text plus a report: written tracks, missing files and unreadable ones."""
-    tracks, missing, failed, cases = [], [], [], {}
+    tracks, missing, failed, cases, days = [], [], [], {}, {}
     for path, record in sorted(store.get("tracks", {}).items()):
         if not os.path.isfile(path):
             missing.append(path)
@@ -196,6 +214,8 @@ def build_xml(store, version="1.0"):
         try:
             lines, cases[path] = track_element(path, record)
             tracks.append(lines)
+            # Records from before playlists existed have no day.
+            days.setdefault(record.get("day") or "Earlier", []).append(int(record["trackID"]))
         except Exception as error:
             failed.append({"path": path, "error": str(error)})
     body = [
@@ -206,7 +226,7 @@ def build_xml(store, version="1.0"):
         *[line for lines in tracks for line in lines],
         "  </COLLECTION>",
         "  <PLAYLISTS>",
-        '    <NODE Type="0" Name="ROOT" Count="0"/>',
+        *playlists(days),
         "  </PLAYLISTS>",
         "</DJ_PLAYLISTS>",
         "",

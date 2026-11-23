@@ -306,11 +306,17 @@ fades.
 
 ## Exporting to Rekordbox
 
-Audio Sorter is where a track's beat grid and memory cues get set; Rekordbox (7.0 or
-later) imports them from a rekordbox XML file and is left for building playlists.
+Audio Sorter is where tracks are sorted and their beat grids and memory cues set;
+Rekordbox (7.0 or later) imports them from a rekordbox XML file and is left for
+building playlists. The intended workflow is one route in: sort with the app, then
+import that day's tracks from the XML (no Import Folder for sorted tracks). Tracks
+already in your Rekordbox library never appear in the XML.
 
-**What gets recorded.** Nothing is sent to Rekordbox until you record it, and only
-once the downbeat is set (D), because Rekordbox's bar 1 comes from it:
+**What goes into the XML.**
+- **Sorting a track** with 1–9 adds it, without a grid: Rekordbox analyses it on
+  import like any new track. Undoing the move (⌘Z) takes it out again.
+- A **recorded grid** adds the grid and memory cues, but only once the downbeat is set
+  (⌘\\ or D), because Rekordbox's bar 1 comes from it:
 - **⌘S** in Cut Bars saves an edit and records the *edit file*: the edited track's
   grid and its cues at save time. Without a downbeat the edit is still saved, just
   not recorded; open the edit, set the downbeat and press ⌘⇧S.
@@ -319,14 +325,18 @@ once the downbeat is set (D), because Rekordbox's bar 1 comes from it:
   single place in the original, so they are left out and the status line says how
   many; save the edit to keep them. The audio file is not changed.
 
-Records live in `~/Library/Application Support/Audio Sorter/grids.json`, keyed by
-the file's path and replaced atomically, so they survive quitting. Opening a
-recorded track in Cut Bars restores its grid and cues (until the app quits, a track's
-in-memory session, including unsaved edits, takes precedence). Moving a file with
-1–9, undoing the move (⌘Z), and moving it to Trash update its record; comment,
-Genre and BPM tag writes don't touch the audio timeline, so records stay valid.
+A track can be sorted first and recorded later, or the other way round; either way
+it keeps one record and one TrackID. Records live in
+`~/Library/Application Support/Audio Sorter/grids.json`, keyed by the file's path and
+replaced atomically, so they survive quitting. Opening a track with a recorded grid
+in Cut Bars restores its grid and cues (until the app quits, a track's in-memory
+session, including unsaved edits, takes precedence). Moving a file with 1–9,
+undoing the move (⌘Z), and moving it to Trash update its record; undoing a sort
+keeps a grid recorded since. Comment, Genre and BPM tag writes don't touch the audio
+timeline, so records stay valid.
 
-**File → Rekordbox Records…** lists every record. Files renamed or deleted outside
+**File → Rekordbox Records…** lists every record, with its BPM (— when there is no
+grid) and cue count. Files renamed or deleted outside
 the app show as **Missing**, and trashed ones as **In Trash**, at the top in red;
 they are never dropped silently, but they are left out of the XML. Put the file
 back to make its record current again, or select it and **Forget selected…**. At
@@ -345,9 +355,16 @@ replaced atomically, including only files that exist. Change its location in
   bar 1 starts on beat 2, 3 or 4. The grid is computed from your downbeat, so it is
   exact there even after rounding the BPM.
 - Memory cues (`POSITION_MARK` with `Num="-1"`), at most 10 per track.
+- Tracks without a recorded grid have no `TEMPO`, no cues and `AverageBpm="0.00"`.
 
-Not exported: hot cues (never written), loops, cue names and colours, playlists,
-key, rating, track colour, My Tags, variable tempo, and time signatures other than 4/4.
+The XML also has a playlist folder, **Audio Sorter**, with one playlist per day
+(`2026-11-22`, newest first) holding the tracks sorted or recorded that day. A track
+moves to the current day's playlist when its grid is recorded again, so a corrected
+grid shows up with the new tracks.
+
+Not exported: hot cues (never written), loops, cue names and colours, other
+playlists, key, rating, track colour, My Tags, variable tempo, and time signatures
+other than 4/4.
 
 ### One-time Rekordbox setup (7.x)
 
@@ -360,10 +377,14 @@ key, rating, track colour, My Tags, variable tempo, and time signatures other th
 ### Importing
 
 1. In the tree, click the refresh button next to **rekordbox xml** to reread the file.
-2. Open **rekordbox xml → All Tracks**, select the tracks, right-click → **Import To
-   Collection** (or drag them onto Collection).
+2. Open **rekordbox xml → Playlists → Audio Sorter →** the day you sorted (or every
+   day since your last import), select all its tracks, right-click → **Import To
+   Collection**. This adds the tracks without creating a playlist in your library;
+   your Intelligent Playlists then pick them up from their tags. Avoid importing
+   **All Tracks** again: it lists everything you have ever sorted.
 
-**New tracks** are added with the grid and cues from the XML. **Tracks already in
+**New tracks** are added with the grid and cues from the XML; tracks without a grid
+are analysed by Rekordbox (with Auto Analysis on). **Tracks already in
 the collection** make Rekordbox ask: "This track already exists in the current
 collection. Do you want to load information in the tag of the library being
 imported? Beat Grid and Key information will not be loaded if the track is set
@@ -505,6 +526,8 @@ verification was performed for this feature; disposable-copy checks remain requi
   calibrated and verified in Rekordbox 7.2.19 for WAV, AIFF and three kinds of MP3.
 - [ ] Measure the assumed MP3 cases (Xing without LAME tag, bad LAME checksum) and
   48 kHz MP3s; check a few real store-bought MP3s end to end.
+- [ ] Verify in Rekordbox that tracks without a grid import and get analysed, and
+  that importing from a day playlist brings in only that day's tracks.
 - [ ] Optionally warn before exporting a grid for a track already imported, since
   re-importing wipes its hot cues and rating in Rekordbox.
 
