@@ -377,14 +377,17 @@ other than 4/4.
 ### Importing
 
 1. In the tree, click the refresh button next to **rekordbox xml** to reread the file.
-2. Open **rekordbox xml → Playlists → Audio Sorter →** the day you sorted (or every
-   day since your last import), select all its tracks, right-click → **Import To
-   Collection**. This adds the tracks without creating a playlist in your library;
-   your Intelligent Playlists then pick them up from their tags. Avoid importing
-   **All Tracks** again: it lists everything you have ever sorted.
+2. Open **rekordbox xml → Playlists → Audio Sorter →** the day you sorted (or each
+   day since your last import). Click a track in the track list, press ⌘A, then
+   right-click → **Import To Collection**. Only that day's tracks are added, without
+   prompts for other tracks and without creating a playlist in your library; your
+   Intelligent Playlists then pick them up from their tags. Avoid importing **All
+   Tracks** again: it lists everything you have ever sorted, so every track Rekordbox
+   already has would prompt.
 
-**New tracks** are added with the grid and cues from the XML; tracks without a grid
-are analysed by Rekordbox (with Auto Analysis on). **Tracks already in
+**New tracks** are added with the grid and cues from the XML, even with Auto Analysis
+on; tracks without a grid are analysed by Rekordbox as usual. (Verified in Rekordbox
+7.2.19, including importing one day's playlist on its own.) **Tracks already in
 the collection** make Rekordbox ask: "This track already exists in the current
 collection. Do you want to load information in the tag of the library being
 imported? Beat Grid and Key information will not be loaded if the track is set
@@ -526,8 +529,8 @@ verification was performed for this feature; disposable-copy checks remain requi
   calibrated and verified in Rekordbox 7.2.19 for WAV, AIFF and three kinds of MP3.
 - [ ] Measure the assumed MP3 cases (Xing without LAME tag, bad LAME checksum) and
   48 kHz MP3s; check a few real store-bought MP3s end to end.
-- [ ] Verify in Rekordbox that tracks without a grid import and get analysed, and
-  that importing from a day playlist brings in only that day's tracks.
+- [x] Verified in Rekordbox: tracks without a grid import and get analysed, tracks
+  with one keep it, and importing a day playlist's tracks brings in only those.
 - [ ] Optionally warn before exporting a grid for a track already imported, since
   re-importing wipes its hot cues and rating in Rekordbox.
 
