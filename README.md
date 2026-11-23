@@ -284,8 +284,9 @@ fades.
   writes it to the original, using the same lossless writer as comments and Genre
   (audio and other tags unchanged). It is enabled only when the value would change.
   WAV BPM goes in an ID3 chunk, because RIFF INFO has no BPM field, and Rekordbox
-  may ignore it (as it does WAV ID3 Genre). Rekordbox reads beat grids only from its
-  own analysis, not from tags.
+  may ignore it (as it does WAV ID3 Genre). Rekordbox reads beat grids from its own
+  analysis or an XML import, never from tags; see
+  [Exporting to Rekordbox](#exporting-to-rekordbox).
 - **Safety checks.** The original is only ever read. The edit is written to a hidden
   temporary file in the same folder, flushed to disk, parsed again, and only then
   linked into place under its final name. A crash or full disk therefore never leaves
@@ -343,11 +344,74 @@ replaced atomically, including only files that exist. Change its location in
 - Memory cues (`POSITION_MARK` with `Num="-1"`), at most 10 per track.
 
 Not exported: hot cues (never written), loops, cue names and colours, playlists,
-key, variable tempo, and time signatures other than 4/4.
+key, rating, track colour, My Tags, variable tempo, and time signatures other than 4/4.
 
-Not yet verified in Rekordbox: whether "Import To Collection" updates a track that is
-already in the collection, and whether MP3 positions need an offset. Both are being
-checked; until then, try a few tracks first.
+### One-time Rekordbox setup (7.x)
+
+1. **Preferences → View → Layout**: tick **rekordbox xml** under Media Browser.
+2. **Preferences → Advanced → Database → rekordbox xml → Imported Library**: choose the
+   XML (by default `~/Music/Audio Sorter/rekordbox.xml`). It only needs setting once;
+   the app rewrites the same file.
+3. Leave **Auto Analysis** as you like it: importing with it on kept the XML grid.
+
+### Importing
+
+1. In the tree, click the refresh button next to **rekordbox xml** to reread the file.
+2. Open **rekordbox xml → All Tracks**, select the tracks, right-click → **Import To
+   Collection** (or drag them onto Collection).
+
+**New tracks** are added with the grid and cues from the XML. **Tracks already in
+the collection** make Rekordbox ask: "This track already exists in the current
+collection. Do you want to load information in the tag of the library being
+imported? Beat Grid and Key information will not be loaded if the track is set
+locked out against analyzing." In the test:
+- **Yes** replaces the track's data with the XML's: the grid and memory cues are
+  updated, and **hot cues, the rating and (presumably) colour and My Tags are wiped**,
+  because the XML doesn't carry them. Memory cues you added in Rekordbox are most
+  likely replaced too.
+- **No** leaves the track as it was.
+
+So import each track once, after setting its grid here, and only answer Yes for a
+track whose Rekordbox-only data (hot cues, rating, colour, tags) you are happy to
+lose. Keep **Don't ask me again** unticked: the dialog is what protects tracks you
+have worked on in Rekordbox. Back up first with **File → Library → Backup Library**.
+If a file was moved after it was imported, Rekordbox shows the old entry as missing;
+importing the new location may add a second entry rather than relocate the first.
+
+### Keeping the grid
+
+Rekordbox's manual warns that re-analysing a track (**Analyze Track**) overwrites an
+adjusted beat grid. Once a track is right, turn on **Analysis Lock** (right-click the
+track or the **Track** menu): locked tracks skip analysis and grid editing. Unlock a
+track before re-importing a corrected grid, since locked tracks don't take the XML's
+grid. If **Preferences → Analysis → CUE Analysis** sets cues during analysis, keep
+**Prohibit overwriting CUEs** on. Rekordbox's MEMORY CUE panel keeps 10 cues per track,
+which is why the editor stops at 10.
+
+### Timing calibration
+
+Rekordbox ignores MP3 gapless headers, so it places MP3 audio later than
+AVFoundation (which the editor uses) does. `rekordbox.py` adds the difference to every
+grid and cue position, in one table (`OFFSETS`), based on how the file starts:
+
+| File | Correction (samples) | Status |
+| --- | --- | --- |
+| WAV, AIFF | 0 | Measured |
+| MP3 with a LAME header (LAME, most stores) | +2304 (52 ms at 44.1 kHz) | Measured |
+| MP3 with FFmpeg's header (the app's MP3 edits) | +1152 (26 ms) | Measured |
+| MP3 without a gapless header | +576 (13 ms) | Measured |
+| MP3 with a Xing header but no LAME tag | +1152 | Assumed |
+| MP3 whose LAME tag checksum is wrong | +2304 | Assumed |
+
+Measured in Rekordbox 7.2.19 with `calibrate.py`, on 44.1 kHz click tracks: the grid
+lines, bar 1 and the memory cues of every measured type were then verified to land
+on the clicks within 1 ms, with the pickup beat before bar 1 shown as beat 4. 48 kHz
+MP3s use the same sample counts but were not measured. To recheck after a Rekordbox
+update, run `.venv/bin/python calibrate.py` (writes click tracks and `calibration.xml`
+to `/tmp/Audio Sorter Calibration`, never the music library), import the XML, and
+see which deliberately offset cue lands on its click; `--verify` checks the table and
+`--update` rewrites the same tracks to test re-importing. Remove the calibration
+tracks from Rekordbox afterwards.
 
 ## Check destination tags
 
@@ -432,15 +496,20 @@ verification was performed for this feature; disposable-copy checks remain requi
   duplicate whole bars, crossfaded splices, save as a new file.
 - [ ] Automatic BPM and downbeat detection (beat_this) to pre-fill the grid.
 - [x] Metronome click over editor playback to check the grid by ear; tap tempo.
-- [ ] Persist grids and edits across launches.
-- [ ] Rekordbox XML export so the grid (BPM + downbeat) and, later, cues set here
-  import into Rekordbox, leaving Rekordbox for playlist building only. Needs a
-  one-file test on the installed Rekordbox version: XML import support, whether
-  re-analysis overwrites imported grids, and MP3 grid offsets (encoder delay).
+- [x] Persist recorded grids and memory cues across launches (Rekordbox records).
+- [ ] Persist unsaved edits and undo history across launches.
+- [x] Memory cues in the editor, and a rekordbox XML export of grids and memory cues,
+  calibrated and verified in Rekordbox 7.2.19 for WAV, AIFF and three kinds of MP3.
+- [ ] Measure the assumed MP3 cases (Xing without LAME tag, bad LAME checksum) and
+  48 kHz MP3s; check a few real store-bought MP3s end to end.
+- [ ] Optionally warn before exporting a grid for a track already imported, since
+  re-importing wipes its hot cues and rating in Rekordbox.
 
 ## Tests
 
-Run `.venv/bin/python -m unittest -v`. Tests use temporary files only. FFmpeg is
+Run `.venv/bin/python -m unittest -v`. Tests use temporary files only, including the
+record store (the native tests point `AUDIO_SORTER_SUPPORT` at a temporary folder)
+and every rekordbox XML they write. FFmpeg is
 needed for real-audio packet-preservation, native playback, and MP3 edit tests;
 those tests skip if unavailable. Native tests require Swift/macOS. Trash is mocked; tests never
 send files to the real Trash or modify the user's music library.
