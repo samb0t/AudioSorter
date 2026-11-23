@@ -1430,12 +1430,14 @@ assert(editor.status.stringValue.hasPrefix("Recorded Plain.wav for Rekordbox"), 
             for i in range(rate * 6):
                 sample = int(20000 * math.sin(2 * math.pi * 220 * i / rate))
                 frames += struct.pack("<hh", sample, sample)
+            from edit import write_bpm
             for name in ("Café & Co #1.wav", "Plain.wav", "Third.wav"):
                 with wave.open(str(root / name), "wb") as output:
                     output.setnchannels(2)
                     output.setsampwidth(2)
                     output.setframerate(rate)
                     output.writeframes(bytes(frames))
+                write_bpm(root / name, 120)
             script = root / "main.swift"
             script.write_text(source + harness)
             helper = str(Path(__file__).with_name("comments.py"))
@@ -1516,6 +1518,20 @@ func settle(_ condition: () -> Bool) {
 for (name, bpm) in [("loop.wav", 120.0), ("loop.mp3", 120.0), ("loop.aiff", 120.0)] {
     let url = root.appendingPathComponent(name)
     editor.open(url)
+    if name == "loop.wav" {
+        // No BPM tag: no guessed grid. Grid actions wait until a BPM is typed or tapped.
+        assert(!editor.session.tempoSet && editor.bpmField.stringValue.isEmpty && !editor.waveform.showsGrid)
+        assert(editor.status.stringValue.contains("No BPM tag"))
+        editor.setDownbeat()
+        editor.addCue()
+        editor.cueToNearestBeat()
+        editor.setSelectionStart()
+        assert(!editor.session.downbeatSet && editor.session.cues.isEmpty && editor.session.selection == nil)
+        assert(editor.status.stringValue.hasPrefix("This file has no BPM tag"))
+        editor.bpmField.stringValue = "120"
+        editor.bpmEntered()
+        assert(editor.session.tempoSet && editor.waveform.showsGrid)
+    }
     assert(editor.session.grid.bpm == bpm && editor.bpmField.stringValue == "120")
     settle { editor.waveform.peaks != nil }
     assert(!editor.saveButton.isEnabled)

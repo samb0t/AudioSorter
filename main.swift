@@ -1967,6 +1967,9 @@ struct EditSession {
     var bars = 16
     // Clicks snap only once the grid has been placed; until then it is a guess.
     var downbeatSet = false
+    // False for a file without a BPM tag until a BPM is typed or tapped: no grid is shown
+    // or used until then, rather than a 120 BPM guess that looks like a real grid.
+    var tempoSet = true
     // Memory cues on the edited track, in beats from its grid's anchor (outputGrid), sorted.
     // Edits are whole bars, so a cut or duplicate moves later cues by exactly its length in
     // beats. Tempo changes and nudges keep each cue on its bar and beat, the same way pieces
@@ -2403,6 +2406,7 @@ final class EditWaveformView: NSView {
     var secondsPerPixel = 0.01
     var fitted = true
     var snapping = false
+    var showsGrid = true { didSet { if showsGrid != oldValue { needsDisplay = true } } }
     var onSeek: ((Double) -> Void)?
     var onGridDrag: ((Double?) -> Void)?
     var onViewChange: (() -> Void)?
@@ -2560,7 +2564,7 @@ final class EditWaveformView: NSView {
             NSRect(x: x(for: selection.start), y: 0, width: x(for: selection.end) - x(for: selection.start), height: bounds.height).fill()
         }
         drawWaveform(timeline, middle: middle, half: half)
-        drawGrid(timeline.grid, height: bounds.height - labelHeight)
+        if showsGrid { drawGrid(timeline.grid, height: bounds.height - labelHeight) }
         NSColor.systemRed.setFill()
         for junction in timeline.junctions {
             NSRect(x: x(for: Double(junction) / rate) - 1, y: 0, width: 2, height: bounds.height - labelHeight).fill()
@@ -2921,8 +2925,9 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         }
         else {
             session = EditSession(grid: BeatGrid(bpm: tagged ?? 120, anchor: 0))
-            status.stringValue = tagged.map { "BPM \(format($0)) from the file's tag. Set a downbeat (D) and check the grid late in the track." }
-                ?? "No BPM tag. Enter the BPM, then set a downbeat (D)."
+            session.tempoSet = tagged != nil
+            status.stringValue = tagged.map { "BPM \(format($0)) from the file's tag. Set a downbeat (⌘\\) and check the grid late in the track." }
+                ?? "No BPM tag. Type the BPM or tap it (T), then set a downbeat (⌘\\)."
         }
         playhead = 0
         titleLabel.stringValue = url.lastPathComponent
@@ -2984,11 +2989,13 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         waveform.timeline = timeline
         waveform.snapping = snapButton.state == .on && session.downbeatSet
         let clicking = clickButton.state == .on
-        metronome.update { $0.grid = timeline.grid; $0.end = timeline.duration; $0.enabled = clicking }
+        let tempoSet = session.tempoSet
+        metronome.update { $0.grid = timeline.grid; $0.end = timeline.duration; $0.enabled = clicking && tempoSet }
+        waveform.showsGrid = tempoSet
         snapButton.toolTip = session.downbeatSet ? "Clicks snap to the finest grid lines shown; zoom in for beats and sixteenths." : "Snapping starts once you set a downbeat (D)."
         playhead = min(playhead, timeline.duration)
         waveform.playhead = playhead
-        if bpmField.currentEditor() == nil { bpmField.stringValue = format(session.grid.bpm) }
+        if bpmField.currentEditor() == nil { bpmField.stringValue = tempoSet ? format(session.grid.bpm) : "" }
         if barsField.currentEditor() == nil { barsField.stringValue = "\(session.bars)" }
         if let selection = session.selection {
             let range = (timeline.grid.barTime(selection), timeline.grid.barTime(selection + session.bars))
@@ -3017,7 +3024,7 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         saveButton.toolTip = session.edited
             ? "Save the edit as a new file beside the original, and record its grid and cues for Rekordbox."
             : "No audio edits: record this file's grid and cues for Rekordbox (same as ⌘⇧S)."
-        writeBPMButton.isEnabled = taggedBPM != tagBPM && !saving
+        writeBPMButton.isEnabled = tempoSet && taggedBPM != tagBPM && !saving
         writeBPMButton.toolTip = "Write \(format(tagBPM)) to the original's BPM tag (currently \(taggedBPM.map(format) ?? "none")). Saved edits get it automatically."
         undoButton.isEnabled = !session.undo.isEmpty
         redoButton.isEnabled = !session.redo.isEmpty
@@ -3212,6 +3219,8 @@ final class EditorController: NSWindowController, NSWindowDelegate {
     // Placing the grid (rather than only changing tempo) turns on snapping.
     func changeGrid(_ grid: BeatGrid, remap: Bool = false, placed: Bool = false) {
         guard grid.bpm.isFinite, (40...300).contains(grid.bpm), grid.anchor.isFinite else { return }
+        // Typing or tapping a BPM sets the tempo; anything that places the grid needs one.
+        if placed || remap { guard tempoKnown() else { return } } else { session.tempoSet = true }
         // Unedited playback does not depend on the grid, so tapping and nudging can continue live.
         if playing && session.edited { stopAndKeepPosition() }
         if remap { session.regrid(grid) } else { session.grid = grid }
@@ -3223,7 +3232,7 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         let text = bpmField.stringValue.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: ",", with: ".")
         guard let bpm = Double(text), (40...300).contains(bpm) else {
             status.stringValue = "Enter a BPM between 40 and 300."
-            bpmField.stringValue = format(session.grid.bpm)
+            bpmField.stringValue = session.tempoSet ? format(session.grid.bpm) : ""
             return
         }
         changeGrid(BeatGrid(bpm: bpm, anchor: session.grid.anchor))
@@ -3267,8 +3276,16 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         refresh()
     }
 
-    @objc func halveTempo() { changeGrid(BeatGrid(bpm: session.grid.bpm / 2, anchor: session.grid.anchor)) }
-    @objc func doubleTempo() { changeGrid(BeatGrid(bpm: session.grid.bpm * 2, anchor: session.grid.anchor)) }
+    @objc func halveTempo() { if tempoKnown() { changeGrid(BeatGrid(bpm: session.grid.bpm / 2, anchor: session.grid.anchor)) } }
+    @objc func doubleTempo() { if tempoKnown() { changeGrid(BeatGrid(bpm: session.grid.bpm * 2, anchor: session.grid.anchor)) } }
+
+    // Grid-based actions wait for a real BPM on files without a tag.
+    func tempoKnown() -> Bool {
+        guard !session.tempoSet else { return true }
+        status.stringValue = "This file has no BPM tag: type the BPM or tap it (T) first."
+        NSSound.beep()
+        return false
+    }
 
     // The playhead is on the edited track; the downbeat is stored on the original.
     func sourceTime(_ output: Double) -> Double? {
@@ -3278,7 +3295,7 @@ final class EditorController: NSWindowController, NSWindowDelegate {
     }
 
     @objc func setDownbeat() {
-        guard let source = sourceTime(playhead) else { return }
+        guard tempoKnown(), let source = sourceTime(playhead) else { return }
         let selectionTime = session.selection.map { timeline.grid.barTime($0) }
         changeGrid(BeatGrid(bpm: session.grid.bpm, anchor: source), remap: true, placed: true)
         // Keep the selection on whichever bar line is now nearest to where it was.
@@ -3300,6 +3317,7 @@ final class EditorController: NSWindowController, NSWindowDelegate {
     // MARK: Selection and edits
 
     @objc func setSelectionStart() {
+        guard tempoKnown() else { return }
         let grid = timeline.grid
         session.selection = max(grid.firstBar, grid.nearestBar(to: playhead))
         refresh()
@@ -3330,6 +3348,7 @@ final class EditorController: NSWindowController, NSWindowDelegate {
     }
 
     func applyEdit(duplicate: Bool) {
+        guard tempoKnown() else { return }
         if playing { stopAndKeepPosition() }
         let before = session.selectionDescription(duration)
         do {
@@ -3363,6 +3382,8 @@ final class EditorController: NSWindowController, NSWindowDelegate {
     // A stopped playhead is already where a click or arrow key put it, snapped or not. While
     // playing, a cue snaps to the nearest beat when snapping is on.
     @objc func addCue() {
+        // Cues are kept in beats, so they need the real tempo first.
+        guard tempoKnown() else { return }
         let grid = timeline.grid
         var time = playing ? (renderedPosition().map { Double($0) / rate } ?? playhead) : playhead
         if playing && waveform.snapping { time = grid.anchor + ((time - grid.anchor) / grid.beatDuration).rounded() * grid.beatDuration }
@@ -3397,6 +3418,7 @@ final class EditorController: NSWindowController, NSWindowDelegate {
 
     // Like Rekordbox's CUE with quantize on: stop, and put the playhead on the nearest beat.
     @objc func cueToNearestBeat() {
+        guard tempoKnown() else { return }
         if playing { stopAndKeepPosition() }
         let grid = timeline.grid
         seek(to: grid.anchor + ((playhead - grid.anchor) / grid.beatDuration).rounded() * grid.beatDuration)

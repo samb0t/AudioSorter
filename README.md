@@ -180,7 +180,9 @@ or import files automatically. Keep gig playlists as curated regular playlists.
 an editor for removing or repeating whole bars, the way you would in Ableton:
 
 1. **Set the grid.** The BPM comes from the file's BPM tag when present (Beatport
-   and most stores set one); otherwise type it, or tap **T** (or **Tap**) along with
+   and most stores set one). Without a tag (promos often have none) the BPM field
+   starts empty and no grid is drawn; setting the downbeat, cues, selections and
+   edits wait until you type the BPM, or tap **T** (or **Tap**) along with
    the beat: after four taps the BPM becomes the running average, to 0.1 BPM, and
    a 2-second pause starts over. Tapping sets tempo only, not the downbeat. Zoom in on the first kick, click to
    put the playhead on it (or press **C** for the nearest beat), and press **⌘\\**
