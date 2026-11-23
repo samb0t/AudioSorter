@@ -1678,6 +1678,12 @@ editor.playhead = 1.7
 assert(key("M", 46, .shift) && near(editor.waveform.cues, [0.6]))
 assert(key("z", 6, .command) && near(editor.waveform.cues, [0.6, 1.8]))
 assert(editor.session.unsaved && editor.window?.isDocumentEdited == true)
+// ⌘= / ⌘− zoom in and out around the playhead; ⌘0 fits the track.
+editor.waveform.fit()
+let fitted = editor.waveform.secondsPerPixel
+assert(key("=", 24, .command) && abs(editor.waveform.secondsPerPixel - fitted / 2) < 1e-12)
+assert(key("-", 27, .command) && abs(editor.waveform.secondsPerPixel - fitted) < 1e-12)
+assert(key("=", 24, .command) && key("0", 29, .command) && editor.waveform.fitted)
 // C is Rekordbox's CUE with quantize: the playhead moves to the nearest beat (0.6 s at 100 BPM).
 editor.playhead = 0.83
 assert(key("c", 8) && abs(editor.playhead - 0.6) < 1e-9)

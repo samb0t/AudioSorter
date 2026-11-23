@@ -242,7 +242,7 @@ can put the playhead on the first kick.
 | Click | Place the playhead (snaps once the grid is placed; ⌘-click is free) |
 | ← / → | Previous/next beat; Shift: bar |
 | Scroll / swipe | Move along the track |
-| Pinch, ⌘/⌥-scroll, = / − | Zoom (down to individual samples); 0 fits the track |
+| Pinch, ⌘/⌥-scroll, ⌘= / ⌘− or = / − | Zoom (down to individual samples); ⌘0 or 0 fits the track |
 | Overview strip | Click or drag to jump |
 | ⌘\\ or D | Downbeat at playhead (⌘\\ as in Rekordbox) |
 | T | Tap tempo |

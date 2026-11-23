@@ -2867,7 +2867,7 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         content.addArrangedSubview(cueRow)
         status.textColor = .secondaryLabelColor
         content.addArrangedSubview(status)
-        let help = NSTextField(wrappingLabelWithString: "Click to place the playhead • Scroll to move • Pinch, ⌘/⌥-scroll or = / − to zoom, 0 fits • ⌥-drag slides the grid • ← / → beat, ⇧ bar • C nearest beat • Shift+, / . nudges 10 ms • T taps tempo • K click • Esc stops")
+        let help = NSTextField(wrappingLabelWithString: "Click to place the playhead • Scroll to move • Pinch, ⌘/⌥-scroll or ⌘= / ⌘− to zoom, ⌘0 fits • ⌥-drag slides the grid • ← / → beat, ⇧ bar • C nearest beat • Shift+, / . nudges 10 ms • T taps tempo • K click • Esc stops")
         help.textColor = .tertiaryLabelColor
         help.font = .systemFont(ofSize: 11)
         content.addArrangedSubview(help)
@@ -3082,6 +3082,10 @@ final class EditorController: NSWindowController, NSWindowDelegate {
             case "d": duplicateSelection(); return true
             case "z": flags.contains(.shift) ? redoEdit() : undoEdit(); return true
             case "\\": setDownbeat(); return true  // Rekordbox's key for it; D works too.
+            // The usual Mac zoom keys, alongside plain = / − / 0.
+            case "=", "+": waveform.zoom(by: 2, around: waveform.x(for: playhead)); return true
+            case "-", "_": waveform.zoom(by: 0.5, around: waveform.x(for: playhead)); return true
+            case "0": waveform.fit(); return true
             default: return false
             }
         }
