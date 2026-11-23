@@ -168,14 +168,18 @@ class ExportTests(unittest.TestCase):
         _, lavc, bare, _ = self.fixtures()
         store = {"tracks": {str(bare): {"bpm": 120, "anchor": 0.01, "cues": [0.005, 1.0], "trackID": 7},
                             str(lavc): {"bpm": 120, "anchor": 0.01, "cues": [0.005, 1.0], "trackID": 8}}}
-        with mock.patch.dict(rekordbox.OFFSETS, {"mp3-none": -0.012}):
+        # Offsets are in samples: a negative one can push the first beat and early cues before 0.
+        with mock.patch.dict(rekordbox.OFFSETS, {"mp3-none": -529}):
             root = parse(rekordbox.build_xml(store)[0])
         by_id = {track.get("TrackID"): track for track in root.iter("TRACK")}
         self.assertEqual(by_id["7"].find("TEMPO").get("Inizio"), "0.498")
         self.assertEqual(by_id["7"].find("TEMPO").get("Battito"), "2")
         self.assertEqual([mark.get("Start") for mark in by_id["7"].iter("POSITION_MARK")], ["0.988"])
-        self.assertEqual(by_id["8"].find("TEMPO").get("Inizio"), "0.010")
-        self.assertEqual([mark.get("Start") for mark in by_id["8"].iter("POSITION_MARK")], ["0.005", "1.000"])
+        # The calibrated FFmpeg offset: one 1152-sample frame, 26.1 ms at 44.1 kHz.
+        self.assertEqual(by_id["8"].find("TEMPO").get("Inizio"), "0.036")
+        self.assertEqual([mark.get("Start") for mark in by_id["8"].iter("POSITION_MARK")], ["0.031", "1.026"])
+        self.assertEqual({key: rekordbox.OFFSETS[key] for key in ("wav", "aiff", "mp3-lame", "mp3-lavc", "mp3-none")},
+                         {"wav": 0, "aiff": 0, "mp3-lame": 2304, "mp3-lavc": 1152, "mp3-none": 576})
 
     def test_mp3_start_classification(self):
         _, lavc, bare, _ = self.fixtures()

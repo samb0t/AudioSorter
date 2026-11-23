@@ -19,17 +19,21 @@ from comments import AudioMetadata, genre_values, read_comment, unsupported
 
 KINDS = {".mp3": "MP3 File", ".wav": "WAV File", ".aif": "AIFF File", ".aiff": "AIFF File"}
 
-# Seconds added to every grid and cue time, by how the file starts, so that Rekordbox's
+# Samples added to every grid and cue time, by how the file starts, so that Rekordbox's
 # positions match AVFoundation's (which the editor uses). This is the only place the
-# correction lives; see calibrate.py and "Exporting to Rekordbox" in the README.
+# correction lives. Measured with calibrate.py in Rekordbox 7.2.19 on 44.1 kHz files
+# (see "Exporting to Rekordbox" in the README). Rekordbox ignores MP3 gapless headers:
+# it plays every file 576 samples later than AVFoundation does without one, skips
+# FFmpeg's header frame but not the encoder delay, and plays LAME's header frame as a
+# frame of silence. MPEG-1 frames are 1152 samples at any rate.
 OFFSETS = {
-    "wav": 0.0,
-    "aiff": 0.0,
-    "mp3-lame": 0.0,      # Xing/Info frame with a LAME tag whose CRC is valid (LAME, most stores).
-    "mp3-lavc": 0.0,      # The same, written by FFmpeg (the app's own MP3 edits).
-    "mp3-bad-crc": 0.0,   # A LAME tag whose CRC does not match.
-    "mp3-xing": 0.0,      # Xing/Info frame without a LAME tag.
-    "mp3-none": 0.0,      # No Xing/Info frame: no gapless information at all.
+    "wav": 0,
+    "aiff": 0,
+    "mp3-lame": 2304,     # Measured: Xing/Info frame with a valid LAME tag (LAME, most stores).
+    "mp3-lavc": 1152,     # Measured: the same, written by FFmpeg (the app's own MP3 edits).
+    "mp3-bad-crc": 2304,  # Not measured: a LAME tag whose CRC does not match; assumed like LAME.
+    "mp3-xing": 1152,     # Not measured: Xing/Info frame without a LAME tag; assumed like FFmpeg.
+    "mp3-none": 576,      # Measured: no Xing/Info frame, so no gapless information at all.
 }
 
 MPEG_BITRATES = {  # kbps by (MPEG-1?, index), layer III only.
@@ -155,10 +159,10 @@ def audio_info(path, record):
 
 def track_element(path, record):
     case = decode_case(path)
-    offset = OFFSETS[case]
+    total, rate, bitrate = audio_info(path, record)
+    offset = OFFSETS[case] / (rate or 44100)
     bpm = round(record["bpm"], 2)  # Rekordbox keeps BPM to 0.01; the grid is exact at the downbeat.
     inizio, battito = first_beat(bpm, record["anchor"] + offset)
-    total, rate, bitrate = audio_info(path, record)
     tags = track_tags(path)
     attributes = {
         "TrackID": int(record["trackID"]),
