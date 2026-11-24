@@ -190,7 +190,7 @@ or import files automatically. Keep gig playlists as curated regular playlists.
 **Cut Bars…** (toolbar, **B**, or **File → Cut Bars… ⌘B**) opens the current track in
 an editor for removing or repeating whole bars, the way you would in Ableton:
 
-1. **Set the grid.** Press **Detect** to have
+1. **Set the grid.** Press **Detect** (**G**) to have
    [beat_this](https://github.com/CPJKU/beat_this) find the BPM and downbeat (about
    10 s for a 6-minute track, in the background). The grid is applied straight away
    and the status line says how well it fits: the share of beats on the grid, and a
@@ -265,6 +265,7 @@ can put the playhead on the first kick.
 | Scroll / swipe | Move along the track |
 | Pinch, ⌘/⌥-scroll, ⌘= / ⌘− or = / − | Zoom (down to individual samples); ⌘0 or 0 fits the track |
 | Overview strip | Click or drag to jump |
+| G | Detect the BPM and downbeat (beat_this) |
 | ⌘\\ or D | Downbeat at playhead (⌘\\ as in Rekordbox) |
 | ⌥← / ⌥→ | Move bar 1 one beat earlier/later (cues stay on the audio) |
 | T | Tap tempo |

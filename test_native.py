@@ -1558,6 +1558,13 @@ assert(key(123, [.option, .numericPad, .function]) && key(123, [.option, .numeri
 assert(abs(editor.session.cueTimes(editor.duration)[0] - 1.5) < 1e-9 && editor.detectUndo == nil)
 // Without ⌥ the arrows still step by beats.
 assert(key(124, [.numericPad, .function]) && abs(editor.session.grid.anchor + 0.18) < 1e-9 && abs(editor.playhead - 1.74) < 1e-9)
+// G runs Detect.
+sorter.hold = nil
+let g = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: editor.window!.windowNumber,
+                         context: nil, characters: "g", charactersIgnoringModifiers: "g", isARepeat: false, keyCode: 5)!
+assert(editor.handle(g) && editor.detecting)
+settle { !editor.detecting }
+assert(sorter.requests.count == 6 && editor.session.grid == BeatGrid(bpm: 124.5, anchor: 1.1))
 '''
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

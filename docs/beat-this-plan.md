@@ -77,7 +77,7 @@ A new helper module, called as `comments.py detect <wav>`, returns
 
 ## 4. In the editor
 
-- A **Detect** button in the grid row (no key yet). It runs in the background, the
+- A **Detect** button in the grid row (key **G**). It runs in the background, the
   button reads "Detecting…", and the status line says "Detecting beats…".
 - On success it applies the grid as if typed and placed: `tempoSet` and `downbeatSet`
   become true, and the selection, cues and edits are remapped exactly as for ⌘\ (one

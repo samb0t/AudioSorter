@@ -2783,7 +2783,7 @@ final class EditorController: NSWindowController, NSWindowDelegate {
     let writeBPMButton = NSButton(title: "Write BPM to tag", target: nil, action: nil)
     let cueLabel = NSTextField(labelWithString: "")
     let recordButton = NSButton(title: "Save grid & cues  ⌘⇧S", target: nil, action: nil)
-    let detectButton = NSButton(title: "Detect", target: nil, action: nil)
+    let detectButton = NSButton(title: "Detect  G", target: nil, action: nil)
     var detecting = false
     var detectJob: CancellationFlag?
     // The session from before the last detection, while ⌘Z can still return to it: until the
@@ -3046,7 +3046,7 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         writeBPMButton.toolTip = "Write \(format(tagBPM)) to the original's BPM tag (currently \(taggedBPM.map(format) ?? "none")). Saved edits get it automatically."
         undoButton.isEnabled = !session.undo.isEmpty || detectUndo?.undoCount == session.undo.count
         detectButton.isEnabled = !detecting && !saving
-        detectButton.title = detecting ? "Detecting…" : "Detect"
+        detectButton.title = detecting ? "Detecting…" : "Detect  G"
         detectButton.toolTip = sorter.detectModel == nil
             ? "Grid detection isn't installed: run zsh build.sh --detect."
             : "Detect the BPM and downbeat with beat_this (about 10 s for a 6-minute track). ⌘Z right after undoes it."
@@ -3140,6 +3140,7 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         case "-", "_": waveform.zoom(by: 0.5, around: waveform.x(for: playhead)); return true
         case "0", ")": waveform.fit(); return true
         case "d": setDownbeat(); return true
+        case "g": detectGrid(); return true
         case "t": tapPressed(); return true
         case "k": clickButton.state = clickButton.state == .on ? .off : .on; clickChanged(); return true
         case "i": setSelectionStart(); return true
