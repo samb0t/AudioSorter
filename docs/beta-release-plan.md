@@ -11,18 +11,21 @@ A tagged commit (`v0.9.0-beta.1`) produces a DMG on a GitHub prerelease that a t
 can drag to Applications and run, with no repo checkout, `.venv`, Homebrew Python or
 `build.sh`. Local development keeps working exactly as now.
 
-## Decision needed first: licence
+## Licence and publisher
 
-The repo has no LICENSE, and Mutagen, which the app ships and imports in `comments.py`,
-`edit.py` and `rekordbox.py`, is GPL-2.0-or-later. Running it from your own checkout is
-fine; distributing it inside the app generally means distributing the app under
-GPL-compatible terms (for example GPL-3.0-or-later, with the source on GitHub). The
-alternatives are keeping the repo private and the beta closed, or replacing Mutagen,
-which would mean re-implementing the ID3/RIFF writer that the safety guarantees rest
-on. Settle this before the first public build. Other bundled parts: PyTorch (BSD),
-beat_this code and weights (MIT), CPython (PSF). FFmpeg stays a separate
+Decided: GPL-3.0-or-later, copyright Bottoni Music LLC (`LICENSE`, README, About
+window). This also covers shipping Mutagen (GPL-2.0-or-later). Other bundled parts:
+PyTorch (BSD), beat_this code and weights (MIT), CPython (PSF). FFmpeg stays a separate
 `brew install ffmpeg`, which keeps LAME/GPL builds out of the bundle; MP3 edits already
 explain this when FFmpeg is missing.
+
+- **Apple Developer Program:** enrol as the organization Bottoni Music LLC, so Gatekeeper
+  shows the LLC as the developer. Needs a D-U-N-S number (free, days to a couple of
+  weeks) and the same $99/year. The name on a Developer ID certificate can't be changed
+  later, so don't enrol personally first.
+- **Bundle ID:** reverse DNS of a domain the LLC controls (for example
+  `com.bottonimusic.audiosorter`), or `io.github.samb0t.audiosorter` without one. Pick
+  it once before the first beta; changing it later resets testers' settings.
 
 ## Why the current app can't be shared
 
@@ -68,8 +71,26 @@ downloaded copy is quarantined by Gatekeeper. The bundle ID is `local.audio-sort
 - GitHub secrets: `DEVELOPER_ID_P12` (base64), `DEVELOPER_ID_P12_PASSWORD`,
   `NOTARY_KEY_P8` (base64), `NOTARY_KEY_ID`, `NOTARY_ISSUER_ID`. The workflow imports
   the certificate into a temporary keychain and deletes it afterwards.
-- Without the secrets the same workflow ad-hoc signs, and the release notes tell
-  testers to right-click → Open (or `xattr -dr com.apple.quarantine`).
+- Without the secrets the same workflow ad-hoc signs (Apple Silicon refuses to run
+  unsigned code at all, so every binary, including the embedded Python's libraries,
+  gets an ad-hoc signature). See "Before the Developer ID" for what testers do.
+
+### Before the Developer ID
+
+Since macOS 15, right-click → Open no longer gets past Gatekeeper for an app that isn't
+notarized. A tester who downloads the ad-hoc-signed DMG has two ways in:
+
+1. Open the app once and dismiss the "Apple could not verify…" alert, then
+   **System Settings → Privacy & Security → Open Anyway**, and confirm with their
+   password. Needed once per installed version.
+2. Or in Terminal, once per download:
+   `xattr -dr com.apple.quarantine "/Applications/Audio Sorter.app"`.
+
+The release notes carry both, with screenshots for option 1. Technical testers can skip
+this entirely by building from source (`zsh build.sh --detect`): a locally built app
+isn't quarantined. Keep the unsigned phase to a small, invited group, since asking
+strangers to override Gatekeeper is exactly what malware asks for too. Homebrew casks
+aren't an option until the app is notarized.
 
 ## 3. Release workflow
 
@@ -87,7 +108,7 @@ downloaded copy is quarantined by Gatekeeper. The bundle ID is `local.audio-sort
 
 ## 4. Before the first tag
 
-- Licence (above) and a short `PRIVACY`/README note: no network use apart from the
+- Bundle ID (above) and a short `PRIVACY`/README note: no network use apart from the
   build-time model download.
 - A "Beta" section in the README: install, FFmpeg for MP3 edits, how to report bugs.
 - Test the DMG on a Mac that has never had the repo: first launch, choosing folders,

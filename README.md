@@ -583,3 +583,14 @@ send files to the real Trash or modify the user's music library.
 GitHub Actions (`.github/workflows/ci.yml`) runs `zsh build.sh --detect` and the full
 suite on an Apple Silicon runner for every push to `main` and every pull request,
 with FFmpeg installed and the beat_this model cached, so no test is skipped.
+
+## License
+
+Copyright © 2026 Bottoni Music LLC.
+
+Audio Sorter is free software: you can redistribute it and/or modify it under the
+terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later version.
+It is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
+PURPOSE. See [LICENSE](LICENSE) for the full text.

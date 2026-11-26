@@ -51,6 +51,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundleIconFile</key><string>AudioSorter.icns</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>1.0</string>
+<key>NSHumanReadableCopyright</key><string>© 2026 Bottoni Music LLC. Licensed under the GNU GPL v3 or later.</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSPrincipalClass</key><string>NSApplication</string>
 </dict></plist>

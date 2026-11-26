@@ -266,6 +266,8 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         let appItem = NSMenuItem()
         menu.addItem(appItem)
         let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "About Audio Sorter", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        appMenu.addItem(.separator())
         let settings = appMenu.addItem(withTitle: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
         settings.target = self
         appMenu.addItem(.separator())
