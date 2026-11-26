@@ -17,30 +17,11 @@ jobs:
   test:
     # Apple Silicon, like the beta's only target.
     runs-on: macos-26
-    timeout-minutes: 30
-    env:
-      HOMEBREW_NO_AUTO_UPDATE: 1
-      HOMEBREW_NO_INSTALL_CLEANUP: 1
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
 
-      # Matches the local .venv; PyTorch wheels lag behind the newest Python.
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: requirements*.txt
-
-      # MP3 edit and packet-preservation tests skip without FFmpeg.
-      - name: Install FFmpeg
-        run: brew install ffmpeg
-
-      # The key is the checksum build.sh verifies, so a new model gets a new cache.
-      - name: Cache beat_this model
-        uses: actions/cache@v6
-        with:
-          path: .build/beat_this/final0.ckpt
-          key: beat-this-final0-8c328b45f59d8dd3dff219253ff6a8d6482be57d0133a29140e2febbf8eb8331
+      - uses: ./.github/actions/setup
 
       - name: Build with detection
         run: zsh build.sh --detect
@@ -51,3 +32,11 @@ jobs:
 
       - name: Run tests
         run: .venv/bin/python -m unittest -v
+
+      - name: Build the release app
+        run: zsh build.sh --release
+
+      - name: Check the release app
+        run: .venv/bin/python -m unittest -v test_release
+        env:
+          AUDIO_SORTER_RELEASE_APP: .build/release/Audio Sorter.app

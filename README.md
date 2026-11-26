@@ -9,6 +9,16 @@ audio playback uses AVFoundation. Format-aware embedded comments and Genre edits
 never re-encode audio. Mutagen decodes/encodes individual ID3 frames; untouched
 frames and container chunks are preserved byte-for-byte.
 
+## Beta
+
+Download the latest DMG from [Releases](https://github.com/samb0t/AudioSorter/releases)
+(Apple Silicon, macOS 14 or later) and drag **Audio Sorter** to Applications. Each
+release's notes explain the first launch, which needs one extra step while the beta isn't
+notarized by Apple. MP3 edits need FFmpeg (`brew install ffmpeg`).
+
+This is a beta: keep backups of your music, and try it on copies first. Report bugs and
+ideas through [Issues](https://github.com/samb0t/AudioSorter/issues/new/choose).
+
 ## Build / launch
 
 Requires macOS, Xcode command-line tools, and Python 3. Internet is needed for the
@@ -31,6 +41,24 @@ zsh build.sh --detect
 This installs `requirements-detect.txt` into `.venv` and downloads the `final0` model
 (78 MB, checksum verified) to `.build/beat_this/`. Later plain builds keep detection
 enabled; without it, **Detect** in Cut Bars explains how to install it.
+
+**Release build.** For a copy that runs on another Mac, without this folder:
+
+```sh
+zsh build.sh --release
+```
+
+This builds `.build/release/Audio Sorter.app` (about 930 MB, Apple Silicon, macOS 14 or
+later) with its own Python 3.12 from
+[python-build-standalone](https://github.com/astral-sh/python-build-standalone)
+(pinned and checksum verified), Mutagen, PyTorch, beat_this and the model inside it. It
+needs no `.venv` and keeps its settings in
+`~/Library/Application Support/Audio Sorter/config.json`, created from
+`config.example.json` on first launch. `AUDIO_SORTER_VERSION` and `AUDIO_SORTER_BUILD`
+set the version and build number; `AUDIO_SORTER_SIGN_IDENTITY` signs with a Developer ID
+instead of ad hoc. Both kinds of build use the bundle ID `com.bottonimusic.audiosorter`;
+the first launch copies the remembered source folder and the Snap and Click settings
+from the old ID, `local.audio-sorter`.
 
 ## Configuration
 
@@ -580,9 +608,38 @@ needed for real-audio packet-preservation, native playback, and MP3 edit tests;
 those tests skip if unavailable. Native tests require Swift/macOS. Trash is mocked; tests never
 send files to the real Trash or modify the user's music library.
 
+`test_release.py` checks a release build the way another Mac runs it: a copy outside
+this folder, an empty environment, signatures, no paths back into the repo, and tags and
+detection through the bundled Python. It is opt-in:
+
+```sh
+AUDIO_SORTER_RELEASE_APP=".build/release/Audio Sorter.app" .venv/bin/python -m unittest -v test_release
+```
+
 GitHub Actions (`.github/workflows/ci.yml`) runs `zsh build.sh --detect` and the full
 suite on an Apple Silicon runner for every push to `main` and every pull request,
-with FFmpeg installed and the beat_this model cached, so no test is skipped.
+with FFmpeg installed and the beat_this model cached, so no test is skipped, then builds
+the release app and runs `test_release.py` on it.
+
+## Releasing
+
+Releases are cut from `main` by pushing an annotated version tag. Its message becomes
+the release notes:
+
+```sh
+git tag -a v0.9.0-beta.1 -m "Audio Sorter 0.9.0 beta 1" -m "What's new: …"
+git push origin v0.9.0-beta.1
+```
+
+`.github/workflows/release.yml` then runs the tests, builds the release app with the
+tag's version (`0.9.0`, build number from the run), checks it with `test_release.py`,
+makes an LZMA DMG with a SHA-256 file and, for a public repo, a build provenance
+attestation, and creates a **draft** release; a suffix (`-alpha.N`, `-beta.N`, `-rc.N`)
+marks it as a prerelease. Download the draft's DMG, try it, then publish it on GitHub.
+The install steps and notes in `.github/release-notes/` are appended automatically.
+
+The app is signed ad hoc until the Developer ID secrets listed in `release.yml` exist;
+then it is signed and the DMG notarized and stapled. See `docs/beta-release-plan.md`.
 
 ## License
 

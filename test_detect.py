@@ -147,40 +147,48 @@ class PhaseTests(unittest.TestCase):
             np.testing.assert_allclose(read, [0.0, 0.25])
 
 
+def house_loop(path, rate=44100, bpm=124, downbeat=0.37):
+    """Kick on every beat, clap on 2 and 4, a chord change each bar, written as a float WAV."""
+    period = 60 / bpm
+    samples = np.zeros(int(rate * 40))
+    t = np.arange(int(rate * 0.25)) / rate
+    kick = np.sin(2 * np.pi * (50 + 100 * np.exp(-t * 30)) * t) * np.exp(-t * 12)
+    clap = np.random.default_rng(1).normal(0, 0.3, len(t)) * np.exp(-t * 40)
+    for number, time in enumerate(np.arange(downbeat, 39, period)):
+        start = int(round(time * rate))
+        end = min(len(samples), start + len(t))
+        samples[start:end] += kick[:end - start]
+        if number % 4 in (1, 3):
+            samples[start:end] += clap[:end - start]
+        if number % 4 == 0:
+            chord = np.arange(int(rate * period * 4)) / rate
+            root = [55, 65.4, 49, 73.4][(number // 4) % 4]
+            pad = 0.1 * sum(np.sin(2 * np.pi * root * ratio * chord) for ratio in (1, 1.26, 1.5))
+            samples[start:start + len(pad)] += pad[:len(samples) - start]
+    float_wav(path, samples / np.max(np.abs(samples)), rate)
+
+
+def assert_house_loop_grid(test, grid, bpm=124, downbeat=0.37):
+    test.assertEqual(grid["bpm"], float(bpm))
+    # The beat phase must be right to within a couple of milliseconds; the downbeat
+    # vote on synthetic audio is not asserted.
+    period = 60 / bpm
+    beat_offset = (grid["anchor"] - downbeat) / period
+    test.assertLess(abs(beat_offset - round(beat_offset)) * period, 0.003)
+
+
 @unittest.skipUnless(importlib.util.find_spec("beat_this") and MODEL.is_file(), "beat_this not installed (zsh build.sh --detect)")
 class ModelTests(unittest.TestCase):
     def test_detects_a_synthetic_house_loop(self):
-        """Kick on every beat, clap on 2 and 4, a chord change each bar, through the helper."""
-        rate, bpm, downbeat = 44100, 124, 0.37
-        period = 60 / bpm
-        samples = np.zeros(int(rate * 40))
-        t = np.arange(int(rate * 0.25)) / rate
-        kick = np.sin(2 * np.pi * (50 + 100 * np.exp(-t * 30)) * t) * np.exp(-t * 12)
-        clap = np.random.default_rng(1).normal(0, 0.3, len(t)) * np.exp(-t * 40)
-        for number, time in enumerate(np.arange(downbeat, 39, period)):
-            start = int(round(time * rate))
-            end = min(len(samples), start + len(t))
-            samples[start:end] += kick[:end - start]
-            if number % 4 in (1, 3):
-                samples[start:end] += clap[:end - start]
-            if number % 4 == 0:
-                chord = np.arange(int(rate * period * 4)) / rate
-                root = [55, 65.4, 49, 73.4][(number // 4) % 4]
-                pad = 0.1 * sum(np.sin(2 * np.pi * root * ratio * chord) for ratio in (1, 1.26, 1.5))
-                samples[start:start + len(pad)] += pad[:len(samples) - start]
+        """Through the helper, as the editor runs it."""
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "loop.wav"
-            float_wav(path, samples / np.max(np.abs(samples)), rate)
+            house_loop(path)
             helper = Path(__file__).with_name("comments.py")
             result = subprocess.run([sys.executable, str(helper), "detect", str(path)],
                                     input=json.dumps({"model": str(MODEL)}), capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        grid = json.loads(result.stdout)
-        self.assertEqual(grid["bpm"], 124.0)
-        # The beat phase must be right to within a couple of milliseconds; the downbeat
-        # vote on synthetic audio is not asserted.
-        beat_offset = (grid["anchor"] - downbeat) / period
-        self.assertLess(abs(beat_offset - round(beat_offset)) * period, 0.003)
+        assert_house_loop_grid(self, json.loads(result.stdout))
 
 
 if __name__ == "__main__":

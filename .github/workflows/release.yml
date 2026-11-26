@@ -1,0 +1,148 @@
+name: Release
+
+# Push an annotated tag such as v0.9.0-beta.1 on main. The tag message becomes the
+# release notes; the result is a draft (pre)release to check before publishing.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+
+jobs:
+  release:
+    runs-on: macos-26
+    timeout-minutes: 60
+    permissions:
+      contents: write # create the draft release
+      id-token: write # build provenance attestation
+      attestations: write
+    env:
+      TAG: ${{ github.ref_name }}
+      SIGNING: ${{ secrets.DEVELOPER_ID_P12 != '' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # Checkout turns the tag into a lightweight one; fetch the real annotated tag.
+      - name: Check the tag
+        run: |
+          git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
+          if [ "$(git cat-file -t "$TAG")" != tag ]; then
+            echo "::error::$TAG is a lightweight tag. Use git tag -a, so its message becomes the release notes."
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$TAG is not on main."
+            exit 1
+          fi
+          # v0.9.0-beta.1: the bundle version is 0.9.0; any suffix makes it a prerelease.
+          if [[ ! "$TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)(-(alpha|beta|rc)\.[0-9]+)?$ ]]; then
+            echo "::error::$TAG is not a version tag like v0.9.0 or v0.9.0-beta.1."
+            exit 1
+          fi
+          echo "VERSION=${BASH_REMATCH[1]}" >> "$GITHUB_ENV"
+          echo "PRERELEASE=$([ -n "${BASH_REMATCH[2]}" ] && echo true || echo false)" >> "$GITHUB_ENV"
+          echo "DMG=Audio-Sorter-${TAG#v}.dmg" >> "$GITHUB_ENV"
+
+      - uses: ./.github/actions/setup
+
+      - name: Build with detection
+        run: zsh build.sh --detect
+
+      - name: Run tests
+        run: .venv/bin/python -m unittest -v
+
+      # Developer ID signing and notarization switch on once these secrets exist:
+      # DEVELOPER_ID_P12 (base64), DEVELOPER_ID_P12_PASSWORD, NOTARY_KEY_P8 (base64),
+      # NOTARY_KEY_ID, NOTARY_ISSUER_ID. Untested until the Apple Developer account exists.
+      - name: Import the Developer ID certificate
+        if: env.SIGNING == 'true'
+        env:
+          P12: ${{ secrets.DEVELOPER_ID_P12 }}
+          P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD=$(uuidgen)
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          printf '%s' "$P12" | base64 --decode > "$RUNNER_TEMP/developer-id.p12"
+          security import "$RUNNER_TEMP/developer-id.p12" -k "$KEYCHAIN" -P "$P12_PASSWORD" -f pkcs12 -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/developer-id.p12"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN" | grep -m1 "Developer ID Application" | awk '{print $2}')
+          echo "AUDIO_SORTER_SIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+
+      - name: Build the release app
+        run: zsh build.sh --release
+        env:
+          AUDIO_SORTER_VERSION: ${{ env.VERSION }}
+          AUDIO_SORTER_BUILD: ${{ github.run_number }}
+
+      - name: Check the release app
+        run: .venv/bin/python -m unittest -v test_release
+        env:
+          AUDIO_SORTER_RELEASE_APP: .build/release/Audio Sorter.app
+
+      - name: Make the DMG
+        run: |
+          STAGE="$RUNNER_TEMP/dmg"
+          mkdir -p "$STAGE"
+          ditto ".build/release/Audio Sorter.app" "$STAGE/Audio Sorter.app"
+          ln -s /Applications "$STAGE/Applications"
+          # LZMA: 320 MB against 419 MB for the default zlib; opens on macOS 10.15+.
+          hdiutil create -volname "Audio Sorter" -srcfolder "$STAGE" -format ULMO "$DMG"
+          if [ "$SIGNING" = true ]; then
+            codesign --force --sign "$AUDIO_SORTER_SIGN_IDENTITY" --timestamp "$DMG"
+          fi
+
+      - name: Notarize the DMG
+        if: env.SIGNING == 'true'
+        env:
+          NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: |
+          printf '%s' "$NOTARY_KEY_P8" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+          xcrun notarytool submit "$DMG" --key "$RUNNER_TEMP/notary.p8" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID" --wait
+          rm "$RUNNER_TEMP/notary.p8"
+          xcrun stapler staple "$DMG"
+
+      - name: Checksum
+        run: shasum -a 256 "$DMG" > "$DMG.sha256"
+
+      # Lets anyone check the DMG came from this workflow and commit:
+      # gh attestation verify <dmg> --repo samb0t/AudioSorter. Public repos only.
+      - name: Attest build provenance
+        if: ${{ !github.event.repository.private }}
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: ${{ env.DMG }}
+
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          NOTES="$RUNNER_TEMP/notes.md"
+          git tag -l --format='%(contents:body)' "$TAG" > "$NOTES"
+          [ -s "$NOTES" ] || git tag -l --format='%(contents:subject)' "$TAG" > "$NOTES"
+          printf '\n' >> "$NOTES"
+          if [ "$SIGNING" = true ]; then
+            cat .github/release-notes/signed.md >> "$NOTES"
+          else
+            cat .github/release-notes/unsigned.md >> "$NOTES"
+          fi
+          cat .github/release-notes/footer.md >> "$NOTES"
+          FLAGS=(--draft --verify-tag --title "Audio Sorter ${TAG#v}" --notes-file "$NOTES")
+          [ "$PRERELEASE" = true ] && FLAGS+=(--prerelease)
+          gh release create "$TAG" "$DMG" "$DMG.sha256" "${FLAGS[@]}"
+
+      - name: Remove the signing keychain
+        if: always() && env.SIGNING == 'true'
+        run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true
