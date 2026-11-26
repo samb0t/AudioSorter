@@ -1,5 +1,7 @@
 # Audio Sorter
 
+[![CI](https://github.com/samb0t/AudioSorter/actions/workflows/ci.yml/badge.svg)](https://github.com/samb0t/AudioSorter/actions/workflows/ci.yml)
+
 ![Audio Sorter: the sorting window and the Cut Bars editor](docs/teaser.png)
 
 Local macOS MP3, WAV, and AIFF (`.aif` / `.aiff`) sorting app. No uploads;
@@ -577,3 +579,7 @@ and every rekordbox XML they write. FFmpeg is
 needed for real-audio packet-preservation, native playback, and MP3 edit tests;
 those tests skip if unavailable. Native tests require Swift/macOS. Trash is mocked; tests never
 send files to the real Trash or modify the user's music library.
+
+GitHub Actions (`.github/workflows/ci.yml`) runs `zsh build.sh --detect` and the full
+suite on an Apple Silicon runner for every push to `main` and every pull request,
+with FFmpeg installed and the beat_this model cached, so no test is skipped.
