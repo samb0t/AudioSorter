@@ -1,0 +1,35 @@
+name: Set up the build
+description: Python 3.12, FFmpeg, and the cached downloads build.sh needs.
+
+runs:
+  using: composite
+  steps:
+    # Matches the local .venv; PyTorch wheels lag behind the newest Python.
+    - uses: actions/setup-python@v7
+      with:
+        python-version: "3.12"
+        cache: pip
+        cache-dependency-path: requirements*.txt
+
+    # MP3 edit and packet-preservation tests skip without FFmpeg.
+    - name: Install FFmpeg
+      shell: bash
+      run: brew install ffmpeg
+      env:
+        HOMEBREW_NO_AUTO_UPDATE: 1
+        HOMEBREW_NO_INSTALL_CLEANUP: 1
+
+    # The key is the checksum build.sh verifies, so a new model gets a new cache.
+    - name: Cache beat_this model
+      uses: actions/cache@v6
+      with:
+        path: .build/beat_this/final0.ckpt
+        key: beat-this-final0-8c328b45f59d8dd3dff219253ff6a8d6482be57d0133a29140e2febbf8eb8331
+
+    # The standalone Python for release builds; file names carry the version.
+    - name: Cache release downloads
+      uses: actions/cache@v6
+      with:
+        path: .build/downloads
+        key: downloads-${{ hashFiles('build.sh') }}
+        restore-keys: downloads-

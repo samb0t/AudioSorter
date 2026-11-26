@@ -1,0 +1,29 @@
+name: Feature idea
+description: Something that would speed up your prep.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Audio Sorter is deliberately focused: a keyboard-first Mac app for sorting, tagging,
+        bar edits and grids/cues for Rekordbox, constant-tempo 4/4. Ideas outside that may be
+        out of scope, but they're still welcome.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What slows you down today
+      description: The task and where it hurts, in your own workflow.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help
+      description: How you'd like it to work, including keys if you have some in mind.
+    validations:
+      required: true
+  - type: textarea
+    id: workaround
+    attributes:
+      label: How you handle it now
+      description: Other tools or steps you use instead, if any.

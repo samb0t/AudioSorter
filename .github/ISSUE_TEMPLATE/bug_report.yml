@@ -1,0 +1,67 @@
+name: Bug report
+description: Something doesn't work as described.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing Audio Sorter. Please don't attach copyrighted audio; describe the
+        file instead (format, bitrate, where it came from).
+  - type: input
+    id: version
+    attributes:
+      label: Audio Sorter version
+      description: Audio Sorter → About Audio Sorter.
+      placeholder: 0.9.0 (12)
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version and Mac
+      placeholder: macOS 15.5, MacBook Air M2
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where it happened
+      options:
+        - Sorting, moving or undo
+        - Comments or Genre tags
+        - Cut Bars editing or saving
+        - Detect (BPM and downbeat)
+        - Memory cues or Rekordbox XML
+        - Settings or destination tag check
+        - Installing or launching
+        - Something else
+    validations:
+      required: true
+  - type: input
+    id: file
+    attributes:
+      label: Audio file
+      description: Format and anything notable. Leave blank if it isn't file-specific.
+      placeholder: "AIFF from Bandcamp, 24-bit / 44.1 kHz, about 6 minutes"
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open a folder with …
+        2. Press …
+        3. …
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected, and what happened instead
+      description: Include the exact text of any error or status message.
+    validations:
+      required: true
+  - type: textarea
+    id: rekordbox
+    attributes:
+      label: Rekordbox (if relevant)
+      description: Rekordbox version, and what you saw after importing or reloading tags.
