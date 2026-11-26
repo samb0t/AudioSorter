@@ -66,6 +66,72 @@ assert(sorter.genreLabel.toolTip == nil)
             result = subprocess.run(["swift", str(script)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_resources_for_development_and_release_builds(self):
+        source = Path(__file__).with_name("main.swift").read_text().split("let app = NSApplication.shared", 1)[0]
+        harness = r'''
+let root = URL(fileURLWithPath: CommandLine.arguments[1])
+let fm = FileManager.default
+let development = root.appendingPathComponent("development")
+let release = root.appendingPathComponent("release")
+let support = root.appendingPathComponent("support")
+try! fm.createDirectory(at: development, withIntermediateDirectories: true)
+try! fm.createDirectory(at: release, withIntermediateDirectories: true)
+
+// Development: the path files win.
+let model = root.appendingPathComponent("final0.ckpt")
+try! Data().write(to: model)
+try! "/repo/.venv/bin/python".write(to: development.appendingPathComponent("python-path"), atomically: true, encoding: .utf8)
+try! "/repo/config.json".write(to: development.appendingPathComponent("config-path"), atomically: true, encoding: .utf8)
+try! model.path.write(to: development.appendingPathComponent("detect-model"), atomically: true, encoding: .utf8)
+assert(AppResources.python(in: development).path == "/repo/.venv/bin/python")
+assert(try! AppResources.configuration(in: development, support: support).path == "/repo/config.json")
+assert(AppResources.model(in: development) == model)
+assert(!fm.fileExists(atPath: support.path))
+
+// Release: everything inside the bundle; config created once in Application Support.
+assert(AppResources.python(in: release).path == release.path + "/python/bin/python3")
+assert(AppResources.model(in: release) == nil)
+try! fm.createDirectory(at: release.appendingPathComponent("beat_this"), withIntermediateDirectories: true)
+try! Data().write(to: release.appendingPathComponent("beat_this/final0.ckpt"))
+assert(AppResources.model(in: release)?.path == release.path + "/beat_this/final0.ckpt")
+try! "{\"example\": true}".write(to: release.appendingPathComponent("config.example.json"), atomically: true, encoding: .utf8)
+let config = try! AppResources.configuration(in: release, support: support)
+assert(config.path == support.path + "/config.json")
+assert(try! String(contentsOf: config, encoding: .utf8) == "{\"example\": true}")
+try! "{\"edited\": true}".write(to: config, atomically: true, encoding: .utf8)
+_ = try! AppResources.configuration(in: release, support: support)
+assert(try! String(contentsOf: config, encoding: .utf8) == "{\"edited\": true}")
+
+// The helper's Python ignores the user's own Python setup.
+let environment = AppResources.pythonEnvironment(["PATH": "/usr/bin", "PYTHONHOME": "/x", "PYTHONPATH": "/y"])
+assert(environment == ["PATH": "/usr/bin", "PYTHONDONTWRITEBYTECODE": "1", "PYTHONNOUSERSITE": "1"])
+
+// Settings move from the old bundle ID once, without overwriting newer values.
+let suffix = UUID().uuidString
+let legacy = UserDefaults(suiteName: "test.legacy." + suffix)!
+let current = UserDefaults(suiteName: "test.current." + suffix)!
+defer {
+    legacy.removePersistentDomain(forName: "test.legacy." + suffix)
+    current.removePersistentDomain(forName: "test.current." + suffix)
+}
+legacy.set("/Music/Inbox", forKey: "source")
+legacy.set(false, forKey: "editorSnap")
+legacy.set(false, forKey: "editorMetronome")
+current.set(true, forKey: "editorMetronome")
+AppResources.migrateDefaults(to: current, from: legacy)
+assert(current.string(forKey: "source") == "/Music/Inbox")
+assert(current.object(forKey: "editorSnap") as? Bool == false)
+assert(current.bool(forKey: "editorMetronome"))
+current.removeObject(forKey: "source")
+AppResources.migrateDefaults(to: current, from: legacy)
+assert(current.string(forKey: "source") == nil)
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            script = Path(directory) / "main.swift"
+            script.write_text(source + harness)
+            result = subprocess.run(["swift", str(script), directory], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_genre_column_loads_lazily_and_caches(self):
         source = Path(__file__).with_name("main.swift").read_text().split("let app = NSApplication.shared", 1)[0]
         source = source.replace("final class Sorter:", "class Sorter:")

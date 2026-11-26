@@ -1,6 +1,7 @@
 # Plan: a downloadable beta
 
-Status: planned. CI is in place (`.github/workflows/ci.yml`: build with detection and
+Status: §1 built (`zsh build.sh --release`, checked by `test_release.py`); §2–4 next.
+CI is in place (`.github/workflows/ci.yml`: build with detection and
 the full suite on an Apple Silicon runner). Decisions agreed: Apple Silicon only,
 detection included in the download, and signing/notarization wired up now but only
 switched on once an Apple Developer ID exists; until then betas are unsigned.
@@ -52,11 +53,12 @@ downloaded copy is quarantined by Gatekeeper. The bundle ID is `local.audio-sort
   builds keep the repo's `config.json`.
 - **Version:** `CFBundleShortVersionString` and `CFBundleVersion` from the tag
   (`0.9.0-beta.1` → `0.9.0`, build number from the run), shown in About.
-- **Bundle ID:** a real reverse-DNS ID, for example `io.github.samb0t.audiosorter`.
-  Changing it moves `UserDefaults` (remembered source folder, Snap and Click toggles);
-  copy the three keys across from `local.audio-sorter` once on first launch.
-- **Size:** PyTorch alone is 626 MB unpacked here. Measure the DMG; expect roughly
-  200–300 MB. Trimming (unused torch libraries, `torchaudio` if beat_this only needs
+- **Bundle ID:** `com.bottonimusic.audiosorter` (decided). Changing it moves
+  `UserDefaults` (remembered source folder, Snap and Click toggles); the three keys are
+  copied across from `local.audio-sorter` once on first launch.
+- **Size:** measured: the app is 932 MB (PyTorch 626 MB); the DMG is 320 MB with LZMA
+  (`hdiutil -format ULMO`, about 3 minutes) against 419 MB with the default zlib (UDZO).
+  Use ULMO. Trimming (unused torch libraries, `torchaudio` if beat_this only needs
   `soxr`) is a follow-up, verified by the detection tests.
 
 ## 2. Signing and notarization (when the Developer ID exists)

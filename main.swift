@@ -121,9 +121,9 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         makeMenu()
+        AppResources.migrateDefaults(to: .standard, from: UserDefaults(suiteName: "local.audio-sorter"))
         do {
-            let path = try String(contentsOf: Bundle.main.resourceURL!.appendingPathComponent("config-path"), encoding: .utf8)
-            configurationURL = URL(fileURLWithPath: path)
+            configurationURL = try AppResources.configuration(in: Bundle.main.resourceURL!, support: supportDirectory)
             configuration = try JSONDecoder().decode(Configuration.self, from: Data(contentsOf: configurationURL))
         } catch {
             NSAlert(error: NSError(domain: "AudioSorter", code: 3, userInfo: [NSLocalizedDescriptionKey: "Cannot load config.json: \(error.localizedDescription)"])).runModal()
@@ -396,12 +396,9 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
 
     var rekordboxXML: URL { URL(fileURLWithPath: (configuration.rekordboxXML as NSString).expandingTildeInPath) }
 
-    // The beat_this model for grid detection, present when the app was built with --detect.
-    var detectModel: URL? {
-        guard let file = Bundle.main.resourceURL?.appendingPathComponent("detect-model"),
-              let path = try? String(contentsOf: file, encoding: .utf8), FileManager.default.fileExists(atPath: path) else { return nil }
-        return URL(fileURLWithPath: path)
-    }
+    // The beat_this model for grid detection, present when the app was built with --detect
+    // or --release.
+    var detectModel: URL? { AppResources.model(in: Bundle.main.resourceURL!) }
 
     func recordGrid(_ url: URL, grid: BeatGrid, cues: [Double], duration: Double, sampleRate: Double) throws {
         try gridStore.set(url, grid: grid, cues: cues, duration: duration, sampleRate: sampleRate)
@@ -736,9 +733,9 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
 
     func helper(_ action: String, file: URL, text: String? = nil) throws -> [String: Any] {
         let resources = Bundle.main.resourceURL!
-        let python = try String(contentsOf: resources.appendingPathComponent("python-path"), encoding: .utf8)
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: python)
+        process.executableURL = AppResources.python(in: resources)
+        process.environment = AppResources.pythonEnvironment(ProcessInfo.processInfo.environment)
         process.arguments = [resources.appendingPathComponent("comments.py").path, action, file.path]
         let output = Pipe()
         process.standardOutput = output
@@ -1842,6 +1839,60 @@ struct GridRecord: Codable, Equatable {
     var hasGrid: Bool { bpm != nil && anchor != nil }
 }
 
+// Tests point this at a temporary folder; the app always uses Application Support.
+var supportDirectory: URL {
+    ProcessInfo.processInfo.environment["AUDIO_SORTER_SUPPORT"].map { URL(fileURLWithPath: $0, isDirectory: true) }
+        ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Audio Sorter", isDirectory: true)
+}
+
+// Development builds (zsh build.sh) name the repo's Python, config and model in small files
+// in Resources; release builds (zsh build.sh --release) carry all three inside the app.
+enum AppResources {
+    static func developmentPath(_ name: String, in resources: URL) -> String? {
+        try? String(contentsOf: resources.appendingPathComponent(name), encoding: .utf8)
+    }
+
+    static func python(in resources: URL) -> URL {
+        URL(fileURLWithPath: developmentPath("python-path", in: resources) ?? resources.appendingPathComponent("python/bin/python3").path)
+    }
+
+    static func model(in resources: URL) -> URL? {
+        let path = developmentPath("detect-model", in: resources) ?? resources.appendingPathComponent("beat_this/final0.ckpt").path
+        return FileManager.default.fileExists(atPath: path) ? URL(fileURLWithPath: path) : nil
+    }
+
+    // Release builds keep config.json beside grids.json, starting from the bundled example.
+    static func configuration(in resources: URL, support: URL) throws -> URL {
+        if let path = developmentPath("config-path", in: resources) { return URL(fileURLWithPath: path) }
+        let url = support.appendingPathComponent("config.json")
+        if !FileManager.default.fileExists(atPath: url.path) {
+            try FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
+            try FileManager.default.copyItem(at: resources.appendingPathComponent("config.example.json"), to: url)
+        }
+        return url
+    }
+
+    // A clean environment for the helper: the bundle is read-only and signed, so no .pyc
+    // writes, and nothing from the user's own Python setup leaks in.
+    static func pythonEnvironment(_ base: [String: String]) -> [String: String] {
+        var environment = base
+        environment["PYTHONHOME"] = nil
+        environment["PYTHONPATH"] = nil
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        environment["PYTHONNOUSERSITE"] = "1"
+        return environment
+    }
+
+    // The bundle ID was local.audio-sorter before 0.9; carry its settings over once.
+    static func migrateDefaults(to defaults: UserDefaults, from legacy: UserDefaults?) {
+        guard !defaults.bool(forKey: "migratedLegacyDefaults") else { return }
+        for key in ["source", "editorMetronome", "editorSnap"] where defaults.object(forKey: key) == nil {
+            if let value = legacy?.object(forKey: key) { defaults.set(value, forKey: key) }
+        }
+        defaults.set(true, forKey: "migratedLegacyDefaults")
+    }
+}
+
 // The persistent store: a small JSON file keyed by absolute path, replaced atomically.
 // Tag writes never change the audio timeline, so they leave records valid; moves, move
 // undo and Trash update the keys. Records are never dropped silently: a file renamed or
@@ -1859,12 +1910,7 @@ final class GridStore {
     // A store that cannot be read is never overwritten, so its records survive for repair.
     private(set) var loadError: String?
 
-    static var defaultURL: URL {
-        // Tests point this at a temporary folder; the app always uses Application Support.
-        let support = ProcessInfo.processInfo.environment["AUDIO_SORTER_SUPPORT"].map { URL(fileURLWithPath: $0, isDirectory: true) }
-            ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Audio Sorter", isDirectory: true)
-        return support.appendingPathComponent("grids.json")
-    }
+    static var defaultURL: URL { supportDirectory.appendingPathComponent("grids.json") }
 
     init(url: URL) {
         self.url = url
@@ -2330,7 +2376,8 @@ func decodeToWAV(_ source: URL, to destination: URL) throws {
         if buffer.frameLength == 0 { break }
         try output.write(from: buffer)
     }
-    output.close()
+    // Before macOS 15 the file closes when `output` is released, on return.
+    if #available(macOS 15, *) { output.close() }
 }
 
 // A click on every beat of the edited track, accented on downbeats, rendered live by the

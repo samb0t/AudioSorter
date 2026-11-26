@@ -32,6 +32,24 @@ This installs `requirements-detect.txt` into `.venv` and downloads the `final0` 
 (78 MB, checksum verified) to `.build/beat_this/`. Later plain builds keep detection
 enabled; without it, **Detect** in Cut Bars explains how to install it.
 
+**Release build.** For a copy that runs on another Mac, without this folder:
+
+```sh
+zsh build.sh --release
+```
+
+This builds `.build/release/Audio Sorter.app` (about 930 MB, Apple Silicon, macOS 14 or
+later) with its own Python 3.12 from
+[python-build-standalone](https://github.com/astral-sh/python-build-standalone)
+(pinned and checksum verified), Mutagen, PyTorch, beat_this and the model inside it. It
+needs no `.venv` and keeps its settings in
+`~/Library/Application Support/Audio Sorter/config.json`, created from
+`config.example.json` on first launch. `AUDIO_SORTER_VERSION` and `AUDIO_SORTER_BUILD`
+set the version and build number; `AUDIO_SORTER_SIGN_IDENTITY` signs with a Developer ID
+instead of ad hoc. Both kinds of build use the bundle ID `com.bottonimusic.audiosorter`;
+the first launch copies the remembered source folder and the Snap and Click settings
+from the old ID, `local.audio-sorter`.
+
 ## Configuration
 
 `config.json` contains your personal settings and is git-ignored, along with build
@@ -579,6 +597,14 @@ and every rekordbox XML they write. FFmpeg is
 needed for real-audio packet-preservation, native playback, and MP3 edit tests;
 those tests skip if unavailable. Native tests require Swift/macOS. Trash is mocked; tests never
 send files to the real Trash or modify the user's music library.
+
+`test_release.py` checks a release build the way another Mac runs it: a copy outside
+this folder, an empty environment, signatures, no paths back into the repo, and tags and
+detection through the bundled Python. It is opt-in:
+
+```sh
+AUDIO_SORTER_RELEASE_APP=".build/release/Audio Sorter.app" .venv/bin/python -m unittest -v test_release
+```
 
 GitHub Actions (`.github/workflows/ci.yml`) runs `zsh build.sh --detect` and the full
 suite on an Apple Silicon runner for every push to `main` and every pull request,
