@@ -1,5 +1,7 @@
 # Audio Sorter
 
+![Audio Sorter: the sorting window and the Cut Bars editor](docs/teaser.png)
+
 Local macOS MP3, WAV, and AIFF (`.aif` / `.aiff`) sorting app. No uploads;
 audio playback uses AVFoundation. Format-aware embedded comments and Genre edits
 never re-encode audio. Mutagen decodes/encodes individual ID3 frames; untouched
