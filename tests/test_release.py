@@ -8,11 +8,13 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import re
 import subprocess
 import tempfile
 import unittest
 
 from .test_detect import assert_house_loop_grid, house_loop
+from .test_lock import locked
 
 APP = os.environ.get("AUDIO_SORTER_RELEASE_APP")
 
@@ -48,6 +50,14 @@ class ReleaseTests(unittest.TestCase):
         info = plistlib.loads((self.app / "Contents" / "Info.plist").read_bytes())
         self.assertEqual(info["CFBundleIdentifier"], "com.bottonimusic.audiosorter")
         self.assertEqual(info["LSMinimumSystemVersion"], "14.0")
+
+    def test_ships_exactly_the_lock(self):
+        script = ("import importlib.metadata as m, json; print(json.dumps("
+                  "{d.metadata['Name']: d.version for d in m.distributions()}))")
+        result = self.python("-c", script)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        installed = {re.sub(r"[-_.]+", "-", name).lower(): version for name, version in json.loads(result.stdout).items()}
+        self.assertEqual(installed, locked())
 
     def test_python_uses_only_the_bundle(self):
         script = "import json, sys; import mutagen, numpy, torch, beat_this.inference; print(json.dumps([sys.prefix, *sys.path]))"

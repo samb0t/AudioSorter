@@ -62,8 +62,9 @@ if [ $RELEASE = 1 ]; then
   PYTHON="$RESOURCES/python/bin/python3"
   # No bytecode while building: it would record this folder's path. compileall adds it below.
   export PYTHONDONTWRITEBYTECODE=1
+  # Exactly the locked versions and files (zsh tools/lock_deps.sh), nothing resolved here.
   "$PYTHON" -m pip install --disable-pip-version-check --no-warn-script-location --no-compile \
-    -r "$ROOT/requirements.txt" -r "$ROOT/requirements-detect.txt"
+    --require-hashes --no-deps -r "$ROOT/requirements-release.lock"
   "$PYTHON" -m pip uninstall --disable-pip-version-check -y pip
   # Drop what the helper never uses. Console scripts go too: their #! lines point at this
   # build folder.
@@ -80,6 +81,8 @@ if [ $RELEASE = 1 ]; then
   cp "$MODEL" "$RESOURCES/beat_this/final0.ckpt"
 else
   python3 -m venv "$ROOT/.venv"
+  # The pip bundled with python3 can be years old; it never ships, but it installs everything.
+  "$ROOT/.venv/bin/python" -m pip install --disable-pip-version-check --quiet --upgrade pip
   "$ROOT/.venv/bin/python" -m pip install --disable-pip-version-check -r "$ROOT/requirements.txt"
   if [ $DETECT = 1 ]; then
     "$ROOT/.venv/bin/python" -m pip install --disable-pip-version-check -r "$ROOT/requirements-detect.txt"
