@@ -206,8 +206,11 @@ class FormatTests(unittest.TestCase):
         path = self.root / "unsupported.mp3"
         block = TagBlock()
         frame = block.encode(TCON(encoding=3, text=["House"]))
+        unknown = b"XYZ" + (4).to_bytes(3, "big") + b"abcd"  # No v2.3 equivalent.
         variants = [b"ID3\x04\0\x80" + synchsafe(len(frame)) + frame,
-                    b"ID3\x02\0\0" + synchsafe(0),
+                    b"ID3\x02\0\x40" + synchsafe(0),  # ID3v2.2 compression.
+                    b"ID3\x02\0\0" + synchsafe(len(unknown)) + unknown,
+                    b"ID3\x05\0\0" + synchsafe(0),
                     b"ID3\x04\0\0" + synchsafe(len(frame) + 1) + frame,
                     b"ID3\x04\0\0" + synchsafe(len(frame)) + frame[:8] + b"\0\x01" + frame[10:]]
         for data in variants:

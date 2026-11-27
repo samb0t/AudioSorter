@@ -33,19 +33,42 @@ def id3_size(data):
     return sum(b << shift for b, shift in zip(data, (21, 14, 7, 0)))
 
 
+def header_problem(version, revision, flags):
+    """Why an ID3v2 header can't be handled, or None."""
+    if version not in (2, 3, 4):
+        return f"ID3v2.{version} tag"
+    if revision:
+        return "ID3 tag with a minor revision"
+    names = {0x80: "unsynchronization", 0x40: "compression" if version == 2 else "an extended header",
+             0x20: "the experimental flag", 0x10: "a footer"}
+    used = [name for bit, name in names.items() if flags & bit] + (["unknown header flags"] if flags & 0x0F else [])
+    return "ID3 tag uses " + " and ".join(used) if used else None
+
+
 class TagBlock:
-    """Strict ID3v2.3/v2.4 parser; preserve even unknown frames as raw bytes."""
+    """Strict ID3v2.3/v2.4 parser; preserve even unknown frames as raw bytes.
+
+    An ID3v2.2 tag (older iTunes) has three-letter frames that can't be edited in place, so it
+    is converted to v2.3 when read, and only if every frame converts without loss. A write then
+    saves the v2.3 tag; `upgraded_from` keeps the original bytes for undo.
+    """
     def __init__(self, data=b""):
         self.version = 4
         self.frames = []
         self.padding = b""
+        self.upgraded_from = None
+        self.verbatim = None  # Exact bytes to write instead, when undo restores a v2.2 tag.
         if not data:
             return
         if len(data) < 10 or data[:3] != b"ID3":
             unsupported("invalid ID3 header")
+        problem = header_problem(data[3], data[4], data[5])
+        if problem:
+            unsupported(problem)
+        if data[3] == 2:
+            self.upgrade(data)
+            return
         self.version = data[3]
-        if self.version not in (3, 4) or data[4:6] != b"\0\0":
-            unsupported("ID3 version, flags, extended header or unsynchronization")
         if id3_size(data[6:10]) != len(data) - 10:
             unsupported("ID3 length/trailing bytes")
         pos, identities = 10, set()
@@ -75,7 +98,44 @@ class TagBlock:
             self.frames.append(raw)
             pos = end
 
+    def upgrade(self, data):
+        if id3_size(data[6:10]) != len(data) - 10:
+            unsupported("ID3 length/trailing bytes")
+        pos, count = 10, 0
+        while pos < len(data) and data[pos] != 0:
+            header = data[pos:pos + 6]
+            if len(header) != 6 or any(c not in b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" for c in header[:3]):
+                unsupported("invalid ID3v2.2 frame header")
+            size = int.from_bytes(header[3:6], "big")
+            if not size or pos + 6 + size > len(data):
+                unsupported("truncated ID3v2.2 frame")
+            count += 1
+            pos += 6 + size
+        if any(data[pos:]):
+            unsupported("nonzero ID3 padding")
+        # Mutagen reads v2.2 frames as their v2.3 equivalents, but drops any it doesn't know,
+        # and keys collapse duplicates: either way the count changes.
+        original = ID3(fileobj=io.BytesIO(data), translate=False)
+        if original.unknown_frames or len(original) != count:
+            unsupported("ID3v2.2 tag with frames that can't be converted to v2.3 without loss")
+        original.update_to_v23()
+        stream = io.BytesIO()
+        original.save(stream, v2_version=3, padding=lambda _: 0)
+        converted = TagBlock(stream.getvalue())
+        # Every frame must read back the same. Only artwork's format field changes form: v2.2
+        # names it ("PNG"), v2.3 gives a MIME type ("image/png").
+        def values(tags):
+            return {key: {name: value for name, value in vars(frame).items() if name != "mime"} for key, frame in tags.items()}
+        if values(converted.tags()) != values(ID3(fileobj=io.BytesIO(data), translate=False)):
+            unsupported("ID3v2.2 tag that reads differently after conversion to v2.3")
+        self.version, self.frames = 3, converted.frames
+        # Same total size where it fits, so the audio stays where it was.
+        self.padding = b"\0" * max(len(data) - len(converted.bytes()), 0)
+        self.upgraded_from = data
+
     def bytes(self):
+        if self.verbatim is not None:
+            return self.verbatim
         body = b"".join(self.frames) + self.padding
         return b"ID3" + bytes([self.version, 0, 0]) + synchsafe(len(body)) + body
 
@@ -252,7 +312,9 @@ def tags_for(path):
 
 
 def primary_comment(tags):
-    comments = tags.getall("COMM")
+    # iTunes keeps playback data in described COMM frames (iTunNORM, iTunSMPB, iTunPGAP,
+    # iTunes_CDDB_IDs); they are never the user's comment, so never shown or replaced.
+    comments = [c for c in tags.getall("COMM") if not c.desc.startswith("iTun")]
     return next((c for c in comments if c.desc == ""), comments[0] if comments else None)
 
 
@@ -265,12 +327,13 @@ def read_comment(path):
 
 
 def write_comment(path, text):
+    """Returns True when the file's ID3v2.2 tag was upgraded to v2.3 to make the edit."""
     metadata = AudioMetadata(path)
     if metadata.wav:
         metadata.info_text(b"ICMT")  # Refuse ambiguous old text rather than replacing it.
         metadata.set_info(b"ICMT", info_encode(text) if text else None)
         metadata.save(edit_info=True)
-        return
+        return False
     tags = metadata.block.tags()
     old = primary_comment(tags)
     # Preserve other COMM frames (e.g. iTunes normalization information).
@@ -278,6 +341,7 @@ def write_comment(path, text):
     replacement = metadata.block.encode(COMM(encoding=3, lang=lang, desc=desc, text=[text])) if text else None
     metadata.block.replace(b"COMM", replacement, old.HashKey if old else "COMM::eng")
     metadata.save(edit_id3=True)
+    return metadata.block.upgraded_from is not None
 
 
 def info_encode(text):
@@ -302,6 +366,7 @@ def write_genre(path, change, validate=None):
     if metadata.wav:
         metadata.info_text(b"IGNR")
         previous = {"riff": base64.b64encode(metadata.info_value(b"IGNR")).decode("ascii") if metadata.info_value(b"IGNR") is not None else None, "id3": previous}
+    exact = None
     if "genre" in change:
         genre = change["genre"]
         if not isinstance(genre, str) or not genre.strip():
@@ -311,12 +376,23 @@ def write_genre(path, change, validate=None):
             metadata.set_info(b"IGNR", info_encode(genre))
     else:
         restore = change["restore"]
+        if isinstance(restore, dict) and "upgradedFrom" in restore:
+            # Put the original ID3v2.2 tag back if nothing has changed the tag since; otherwise
+            # restore only the Genre, in the upgraded tag, so later edits survive.
+            if hashlib.sha256(metadata.block.bytes()).hexdigest() == restore["upgradedTag"]:
+                exact = base64.b64decode(restore["upgradedFrom"], validate=True)
+            restore = restore["previous"]
         if metadata.wav:
             metadata.set_info(b"IGNR", base64.b64decode(restore["riff"], validate=True) if restore["riff"] is not None else None)
             restore = restore["id3"]
         replacement = (base64.b64decode(restore["raw"], validate=True) if "raw" in restore else metadata.block.encode(TCON(encoding=restore["encoding"], text=restore["text"]))) if restore is not None else None
     metadata.block.replace(b"TCON", replacement)
-    metadata.save(edit_id3=not metadata.wav or old_raw is not None or replacement is not None, edit_info=metadata.wav, validate=validate)
+    metadata.block.verbatim = exact
+    edit_id3 = not metadata.wav or old_raw is not None or replacement is not None or exact is not None
+    metadata.save(edit_id3=edit_id3, edit_info=metadata.wav, validate=validate)
+    if edit_id3 and exact is None and metadata.block.upgraded_from is not None:
+        previous = {"upgradedFrom": base64.b64encode(metadata.block.upgraded_from).decode("ascii"),
+                    "upgradedTag": hashlib.sha256(metadata.block.bytes()).hexdigest(), "previous": previous}
     return previous
 
 
@@ -519,8 +595,7 @@ if __name__ == "__main__":
             genres, warning = genre_values(path)
             print(json.dumps({"genres": genres, "warning": warning}))
         elif action == "write":
-            write_comment(path, sys.stdin.read())
-            print(json.dumps({"ok": True}))
+            print(json.dumps({"ok": True, "upgradedID3": write_comment(path, sys.stdin.read())}))
         elif action == "write-genre":
             previous = write_genre(path, json.load(sys.stdin))
             print(json.dumps({"previous": previous}))
@@ -529,8 +604,7 @@ if __name__ == "__main__":
             print(json.dumps({"bpm": read_bpm(path)}))
         elif action == "write-bpm":
             from edit import write_bpm
-            write_bpm(path, json.load(sys.stdin)["bpm"])
-            print(json.dumps({"ok": True}))
+            print(json.dumps({"ok": True, "upgradedID3": write_bpm(path, json.load(sys.stdin)["bpm"])}))
         elif action == "cut":
             from edit import cut_file
             print(json.dumps(cut_file(path, json.load(sys.stdin))))
