@@ -604,7 +604,7 @@ verification was performed for this feature; disposable-copy checks remain requi
 | --- | --- |
 | `app/` | Everything that ships: `main.swift`, the Python helpers it runs (`comments.py`, `edit.py`, `detect.py`, `rekordbox.py`) and `icon.png` |
 | `tests/` | The test suite (`python -m unittest` from the repo root finds it) |
-| `tools/` | Development tools that don't ship: `calibrate.py` |
+| `tools/` | Development tools that don't ship: `calibrate.py`, and `check_deps.py` (outdated or vulnerable dependencies; see `AGENTS.md`) |
 | `docs/` | Design plans and the teaser image |
 | `.github/` | CI and release workflows, release-note templates, issue forms |
 | `build.sh` | Builds the app: plain, `--detect` or `--release` |

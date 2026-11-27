@@ -80,6 +80,8 @@ if [ $RELEASE = 1 ]; then
   cp "$MODEL" "$RESOURCES/beat_this/final0.ckpt"
 else
   python3 -m venv "$ROOT/.venv"
+  # The pip bundled with python3 can be years old; it never ships, but it installs everything.
+  "$ROOT/.venv/bin/python" -m pip install --disable-pip-version-check --quiet --upgrade pip
   "$ROOT/.venv/bin/python" -m pip install --disable-pip-version-check -r "$ROOT/requirements.txt"
   if [ $DETECT = 1 ]; then
     "$ROOT/.venv/bin/python" -m pip install --disable-pip-version-check -r "$ROOT/requirements-detect.txt"
