@@ -86,7 +86,7 @@ jobs:
           AUDIO_SORTER_BUILD: ${{ github.run_number }}
 
       - name: Check the release app
-        run: .venv/bin/python -m unittest -v test_release
+        run: .venv/bin/python -m unittest -v tests.test_release
         env:
           AUDIO_SORTER_RELEASE_APP: .build/release/Audio Sorter.app
 

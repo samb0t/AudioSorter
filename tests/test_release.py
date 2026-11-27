@@ -2,7 +2,7 @@
 outside this folder, an empty environment, and nothing but what the bundle carries.
 
 Opt-in, since it needs a built app:
-AUDIO_SORTER_RELEASE_APP=".build/release/Audio Sorter.app" .venv/bin/python -m unittest -v test_release
+AUDIO_SORTER_RELEASE_APP=".build/release/Audio Sorter.app" .venv/bin/python -m unittest -v tests.test_release
 """
 import json
 import os
@@ -12,7 +12,7 @@ import subprocess
 import tempfile
 import unittest
 
-from test_detect import assert_house_loop_grid, house_loop
+from .test_detect import assert_house_loop_grid, house_loop
 
 APP = os.environ.get("AUDIO_SORTER_RELEASE_APP")
 

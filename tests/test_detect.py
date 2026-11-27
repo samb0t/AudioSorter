@@ -11,10 +11,11 @@ import wave
 
 import numpy as np
 
+from . import APP, ROOT
 from comments import chunk
 from detect import fit_grid, onset_strength, read_wav, refine_phase
 
-MODEL = Path(__file__).with_name(".build") / "beat_this" / "final0.ckpt"
+MODEL = ROOT / ".build" / "beat_this" / "final0.ckpt"
 FRAME = 0.02  # beat_this reports times on a 50 fps frame grid.
 
 
@@ -184,7 +185,7 @@ class ModelTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "loop.wav"
             house_loop(path)
-            helper = Path(__file__).with_name("comments.py")
+            helper = APP / "comments.py"
             result = subprocess.run([sys.executable, str(helper), "detect", str(path)],
                                     input=json.dumps({"model": str(MODEL)}), capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

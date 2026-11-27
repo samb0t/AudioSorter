@@ -1,8 +1,8 @@
 """Check that Rekordbox puts grids and memory cues where the editor did, per file type.
 
-    .venv/bin/python calibrate.py [folder]            # fixtures + calibration.xml
-    .venv/bin/python calibrate.py [folder] --update   # the same tracks, changed, to test re-import
-    .venv/bin/python calibrate.py [folder] --verify   # new "Verify" tracks, offsets applied
+    .venv/bin/python tools/calibrate.py [folder]            # fixtures + calibration.xml
+    .venv/bin/python tools/calibrate.py [folder] --update   # the same tracks, changed, to test re-import
+    .venv/bin/python tools/calibrate.py [folder] --verify   # new "Verify" tracks, offsets applied
 
 Writes click tracks (WAV, AIFF, MP3 from LAME, MP3 from FFmpeg, MP3 without a gapless
 header) to a scratch folder, never the music library, and an XML that uses the app's own
@@ -29,6 +29,8 @@ import wave
 
 from mutagen.id3 import COMM, ID3, TCON, TIT2, TPE1
 
+# Uses the app's own helpers, exporter included.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "app"))
 import rekordbox
 from comments import chunk
 from edit import ffmpeg

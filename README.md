@@ -491,11 +491,11 @@ grid and cue position, in one table (`OFFSETS`), based on how the file starts:
 | MP3 with a Xing header but no LAME tag | +1152 | Assumed |
 | MP3 whose LAME tag checksum is wrong | +2304 | Assumed |
 
-Measured in Rekordbox 7.2.19 with `calibrate.py`, on 44.1 kHz click tracks: the grid
+Measured in Rekordbox 7.2.19 with `tools/calibrate.py`, on 44.1 kHz click tracks: the grid
 lines, bar 1 and the memory cues of every measured type were then verified to land
 on the clicks within 1 ms, with the pickup beat before bar 1 shown as beat 4. 48 kHz
 MP3s use the same sample counts but were not measured. To recheck after a Rekordbox
-update, run `.venv/bin/python calibrate.py` (writes click tracks and `calibration.xml`
+update, run `.venv/bin/python tools/calibrate.py` (writes click tracks and `calibration.xml`
 to `/tmp/Audio Sorter Calibration`, never the music library), import the XML, and
 see which deliberately offset cue lands on its click; `--verify` checks the table and
 `--update` rewrites the same tracks to test re-importing. Remove the calibration
@@ -598,6 +598,17 @@ verification was performed for this feature; disposable-copy checks remain requi
 - [ ] Optionally warn before exporting a grid for a track already imported, since
   re-importing wipes its hot cues and rating in Rekordbox.
 
+## Project layout
+
+| Path | Contents |
+| --- | --- |
+| `app/` | Everything that ships: `main.swift`, the Python helpers it runs (`comments.py`, `edit.py`, `detect.py`, `rekordbox.py`) and `icon.png` |
+| `tests/` | The test suite (`python -m unittest` from the repo root finds it) |
+| `tools/` | Development tools that don't ship: `calibrate.py` |
+| `docs/` | Design plans and the teaser image |
+| `.github/` | CI and release workflows, release-note templates, issue forms |
+| `build.sh` | Builds the app: plain, `--detect` or `--release` |
+
 ## Tests
 
 Run `.venv/bin/python -m unittest -v`. The beat_this model test runs only after
@@ -608,12 +619,12 @@ needed for real-audio packet-preservation, native playback, and MP3 edit tests;
 those tests skip if unavailable. Native tests require Swift/macOS. Trash is mocked; tests never
 send files to the real Trash or modify the user's music library.
 
-`test_release.py` checks a release build the way another Mac runs it: a copy outside
+`tests/test_release.py` checks a release build the way another Mac runs it: a copy outside
 this folder, an empty environment, signatures, no paths back into the repo, and tags and
 detection through the bundled Python. It is opt-in:
 
 ```sh
-AUDIO_SORTER_RELEASE_APP=".build/release/Audio Sorter.app" .venv/bin/python -m unittest -v test_release
+AUDIO_SORTER_RELEASE_APP=".build/release/Audio Sorter.app" .venv/bin/python -m unittest -v tests.test_release
 ```
 
 GitHub Actions (`.github/workflows/ci.yml`) runs `zsh build.sh --detect` and the full

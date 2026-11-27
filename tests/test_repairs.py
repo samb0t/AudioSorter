@@ -10,9 +10,10 @@ from unittest.mock import patch
 
 from mutagen.id3 import TCON
 
+from . import APP
 from comments import (AudioMetadata, WAV_GENRE_CONFLICT, genre_values, lint_destinations,
                       recheck_genres, repair_genres, repair_missing_genres, synchsafe, write_comment, write_genre)
-from test_formats import fixture, rich_tags
+from .test_formats import fixture, rich_tags
 
 
 class RepairTests(unittest.TestCase):
@@ -100,7 +101,7 @@ class RepairTests(unittest.TestCase):
         write_genre(path, {"genre": "House"})
         config_path = self.root / "config.json"
         config_path.write_text(json.dumps(self.config))
-        completed = subprocess.run([sys.executable, str(Path(__file__).with_name("comments.py")),
+        completed = subprocess.run([sys.executable, str(APP / "comments.py"),
                                     "recheck-genres", str(self.root)],
                                    input=json.dumps({"findings": findings, "configurationPath": str(config_path)}),
                                    capture_output=True, text=True)
@@ -215,7 +216,7 @@ class RepairTests(unittest.TestCase):
         path = self.conflict()
         config_path = self.root / "config.json"
         config_path.write_text(json.dumps(self.config))
-        completed = subprocess.run([sys.executable, str(Path(__file__).with_name("comments.py")),
+        completed = subprocess.run([sys.executable, str(APP / "comments.py"),
                                     "repair-genres", str(self.root)],
                                    input=json.dumps({"findings": self.scan(), "configurationPath": str(config_path)}),
                                    capture_output=True, text=True)
@@ -415,7 +416,7 @@ class RepairTests(unittest.TestCase):
         findings = self.scan()
         config_path = self.root / "config.json"
         config_path.write_text(json.dumps(self.config))
-        completed = subprocess.run([sys.executable, str(Path(__file__).with_name("comments.py")),
+        completed = subprocess.run([sys.executable, str(APP / "comments.py"),
                                     "repair-missing-genres", str(self.root)],
                                    input=json.dumps({"findings": findings, "configurationPath": str(config_path)}),
                                    capture_output=True, text=True)
