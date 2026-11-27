@@ -23,7 +23,9 @@ Check dependencies before tagging a release, and when asked to review them:
 3. For each newer version, read its changelog before updating, especially Mutagen (it
    writes every tag) and PyTorch/beat_this (detection). A version held back by another
    package's requirement (the script shows which) is not a missed update.
-4. Update on a branch: change the pin (or the URL and SHA-256 in `build.sh`), rebuild
-   both ways, and run `.venv/bin/python -m unittest` and
+4. Update on a branch: change the pin (or the URL and SHA-256 in `build.sh`), run
+   `zsh tools/lock_deps.sh` to regenerate `requirements-release.lock` (add `--upgrade`
+   to move unpinned dependencies too, and review the diff), rebuild both ways, and run
+   `.venv/bin/python -m unittest` and
    `AUDIO_SORTER_RELEASE_APP=".build/release/Audio Sorter.app" .venv/bin/python -m unittest tests.test_release`.
    Mention what changed and why in the commit message.

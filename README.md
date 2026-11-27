@@ -51,7 +51,11 @@ zsh build.sh --release
 This builds `.build/release/Audio Sorter.app` (about 930 MB, Apple Silicon, macOS 14 or
 later) with its own Python 3.12 from
 [python-build-standalone](https://github.com/astral-sh/python-build-standalone)
-(pinned and checksum verified), Mutagen, PyTorch, beat_this and the model inside it. It
+(pinned and checksum verified), Mutagen, PyTorch, beat_this and the model inside it. Its
+Python packages come only from `requirements-release.lock`: every package, including
+PyTorch's own dependencies, at an exact version with its SHA-256 hashes, so each release
+build installs the same files. After changing `requirements*.txt`, regenerate it with
+`zsh tools/lock_deps.sh`; `tests/test_lock.py` fails until you do. It
 needs no `.venv` and keeps its settings in
 `~/Library/Application Support/Audio Sorter/config.json`, created from
 `config.example.json` on first launch. `AUDIO_SORTER_VERSION` and `AUDIO_SORTER_BUILD`
@@ -604,7 +608,7 @@ verification was performed for this feature; disposable-copy checks remain requi
 | --- | --- |
 | `app/` | Everything that ships: `main.swift`, the Python helpers it runs (`comments.py`, `edit.py`, `detect.py`, `rekordbox.py`) and `icon.png` |
 | `tests/` | The test suite (`python -m unittest` from the repo root finds it) |
-| `tools/` | Development tools that don't ship: `calibrate.py`, and `check_deps.py` (outdated or vulnerable dependencies; see `AGENTS.md`) |
+| `tools/` | Development tools that don't ship: `calibrate.py`, `check_deps.py` (outdated or vulnerable dependencies; see `AGENTS.md`) and `lock_deps.sh` (regenerates `requirements-release.lock`) |
 | `docs/` | Design plans and the teaser image |
 | `.github/` | CI and release workflows, release-note templates, issue forms |
 | `build.sh` | Builds the app: plain, `--detect` or `--release` |
