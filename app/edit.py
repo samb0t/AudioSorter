@@ -312,8 +312,11 @@ def read_bpm(path):
 def write_bpm(path, bpm):
     """Set TBPM on an existing file in place, with the same lossless, verified writer as comments.
 
-    WAV files get an ID3 chunk if they have none; RIFF INFO has no BPM field.
+    WAV files get an ID3 chunk if they have none; RIFF INFO has no BPM field. Returns True
+    when the file's ID3v2.2 tag was upgraded to v2.3 to make the edit.
     """
     metadata = AudioMetadata(path)
+    upgraded = metadata.block.upgraded_from is not None
     metadata.block = with_bpm(metadata.block, bpm)
     metadata.save(edit_id3=True)
+    return upgraded

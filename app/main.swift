@@ -762,9 +762,9 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
         guard files.indices.contains(index), comment.string != originalComment else { return true }
         guard commentReadable else { return false }
         do {
-            _ = try helper("write", file: files[index], text: comment.string)
+            let result = try helper("write", file: files[index], text: comment.string)
             originalComment = comment.string
-            status.stringValue = "Comment saved to audio file."
+            status.stringValue = "Comment saved to audio file." + (result["upgradedID3"] as? Bool == true ? id3UpgradeNote : "")
             return true
         } catch { report(error); return false }
     }
@@ -947,7 +947,8 @@ final class Sorter: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTa
             else { clear() }
             window.makeFirstResponder(table)
             let tagged = genre.map { " Genre: \($0)." } ?? ""
-            status.stringValue = "Moved to \(names[destination]).\(tagged) ⌘Z undoes move/tag.\(oldIndex >= files.count ? " End of list." : "")\(recordNote)"
+            let upgraded = (restore?["restore"] as? [String: Any])?["upgradedFrom"] != nil ? id3UpgradeNote : ""
+            status.stringValue = "Moved to \(names[destination]).\(tagged)\(upgraded) ⌘Z undoes move/tag.\(oldIndex >= files.count ? " End of list." : "")\(recordNote)"
         } catch {
             player?.currentTime = position
             if wasPlaying { player?.play() }
@@ -1838,6 +1839,9 @@ struct GridRecord: Codable, Equatable {
     var trashed: Bool?
     var hasGrid: Bool { bpm != nil && anchor != nil }
 }
+
+// Older iTunes tags (ID3v2.2) are converted to v2.3 on their first write; say so when it happens.
+let id3UpgradeNote = " Its ID3v2.2 tag was upgraded to v2.3."
 
 // Tests point this at a temporary folder; the app always uses Application Support.
 var supportDirectory: URL {
@@ -3353,9 +3357,10 @@ final class EditorController: NSWindowController, NSWindowDelegate {
         let bpm = tagBPM
         do {
             let json = String(decoding: try JSONSerialization.data(withJSONObject: ["bpm": bpm]), as: UTF8.self)
-            _ = try sorter.helper("write-bpm", file: url, text: json)
+            let result = try sorter.helper("write-bpm", file: url, text: json)
             taggedBPM = bpm
-            status.stringValue = "Wrote BPM \(format(bpm)) to \(url.lastPathComponent). Its audio and other tags are unchanged."
+            status.stringValue = "Wrote BPM \(format(bpm)) to \(url.lastPathComponent). "
+                + (result["upgradedID3"] as? Bool == true ? "Its audio is unchanged." + id3UpgradeNote : "Its audio and other tags are unchanged.")
         } catch {
             status.stringValue = "BPM not written: \(error.localizedDescription)"
         }

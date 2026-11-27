@@ -169,7 +169,8 @@ the original in place. A failed Genre write rolls back the move; if rollback als
 fails, the error reports the remaining file location for recovery. Move undo is
 session-only, restores the previous Genre (including an absent Genre), and does not
 undo comment edits. Undo refuses to overwrite files at the original path.
-Edits preserve other tag frames and existing ID3v2.3/v2.4 format, with verified,
+Edits preserve other tag frames and existing ID3v2.3/v2.4 format (ID3v2.2 is upgraded;
+see below), with verified,
 atomic same-directory temporary-file replacement. Artwork, DJ-specific frames,
 opaque chunks, audio payloads, and chunk alignment bytes are copied unchanged.
 As with any tag editor, keep backups of valuable files.
@@ -200,9 +201,20 @@ are reported as unsupported, not guessed or silently converted. Unicode remains
 supported for MP3/AIFF ID3 comments and Genre. International WAV encoding support
 requires separate Rekordbox verification.
 
-Malformed chunk sizes, duplicate INFO fields/lists or ID3 chunks/frames, ID3v2.2,
-extended/flagged/unsynchronized ID3, and RF64/RIFX WAV are rejected rather than
-repaired. The same checks apply to linting. Supported RIFF WAVE and FORM AIFF/AIFC
+**ID3v2.2** (older iTunes) uses three-letter frames that can't be edited in place. Such a
+tag is read as it is, and converted to ID3v2.3 on the file's first comment, Genre or BPM
+write; the status line says so. Conversion happens only when every frame reads back
+the same afterwards (artwork's format becomes a MIME type, `PNG` → `image/png`); a tag
+with frames Mutagen can't convert stays unsupported. The old padding absorbs v2.3's
+longer frame headers where it can, so the audio doesn't move. Genre undo puts the
+original v2.2 tag back byte for byte, unless the tag changed again since (a later
+comment edit, say), in which case it restores only the Genre and keeps v2.3. iTunes'
+own playback frames (`COMM` with an `iTunNORM`, `iTunSMPB`, `iTunPGAP` or
+`iTunes_CDDB_IDs` description) are never shown or replaced as the comment.
+
+Malformed chunk sizes, duplicate INFO fields/lists or ID3 chunks/frames,
+extended/flagged/unsynchronized or compressed ID3, and RF64/RIFX WAV are rejected
+rather than repaired; the message names the cause. The same checks apply to linting. Supported RIFF WAVE and FORM AIFF/AIFC
 layouts must have exactly one audio-data chunk and one format chunk. Writes use
 in-memory copies, so very large files may require substantial memory. A failed
 write leaves the original intact and cleans up its temporary file.
