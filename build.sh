@@ -1,6 +1,7 @@
 #!/bin/zsh
 set -eu
 ROOT="${0:A:h}"
+SOURCES="$ROOT/app"
 # Plain builds run from this folder, using its .venv, config.json and (with --detect) the
 # beat_this model. --release builds a self-contained app in .build/release with its own
 # Python and model; it keeps its settings in ~/Library/Application Support/Audio Sorter.
@@ -99,12 +100,12 @@ fi
 ICONSET="$ROOT/.build/AudioSorter.iconset"
 mkdir -p "$ICONSET"
 for SIZE in 16 32 128 256 512; do
-  sips -z "$SIZE" "$SIZE" "$ROOT/icon-concept.png" --out "$ICONSET/icon_${SIZE}x${SIZE}.png" > /dev/null
+  sips -z "$SIZE" "$SIZE" "$SOURCES/icon.png" --out "$ICONSET/icon_${SIZE}x${SIZE}.png" > /dev/null
   DOUBLE=$((SIZE * 2))
-  sips -z "$DOUBLE" "$DOUBLE" "$ROOT/icon-concept.png" --out "$ICONSET/icon_${SIZE}x${SIZE}@2x.png" > /dev/null
+  sips -z "$DOUBLE" "$DOUBLE" "$SOURCES/icon.png" --out "$ICONSET/icon_${SIZE}x${SIZE}@2x.png" > /dev/null
 done
 iconutil -c icns "$ICONSET" -o "$RESOURCES/AudioSorter.icns"
-cp "$ROOT/comments.py" "$ROOT/edit.py" "$ROOT/rekordbox.py" "$ROOT/detect.py" "$ROOT/config.example.json" "$RESOURCES/"
+cp "$SOURCES/comments.py" "$SOURCES/edit.py" "$SOURCES/rekordbox.py" "$SOURCES/detect.py" "$ROOT/config.example.json" "$RESOURCES/"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -122,7 +123,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <key>NSPrincipalClass</key><string>NSApplication</string>
 </dict></plist>
 PLIST
-swiftc -O -target "arm64-apple-macos$MINIMUM_MACOS" "$ROOT/main.swift" -o "$APP/Contents/MacOS/AudioSorter" -framework Cocoa -framework AVFoundation
+swiftc -O -target "arm64-apple-macos$MINIMUM_MACOS" "$SOURCES/main.swift" -o "$APP/Contents/MacOS/AudioSorter" -framework Cocoa -framework AVFoundation
 # Inside out: every library and the interpreter first, then the app that seals them.
 if [ $RELEASE = 1 ]; then
   find "$RESOURCES/python" -type f \( -name '*.so' -o -name '*.dylib' -o -name 'python3.12' \) -print0 \

@@ -7,6 +7,8 @@ import tempfile
 import os
 import unittest
 
+from . import APP
+
 SUPPORT = None
 
 
@@ -25,7 +27,7 @@ def tearDownModule():
 @unittest.skipUnless(shutil.which("swift"), "Swift unavailable")
 class NativeTests(unittest.TestCase):
     def test_current_genre_display_and_clearing(self):
-        source = Path(__file__).with_name("main.swift").read_text().split("let app = NSApplication.shared", 1)[0]
+        source = (APP / "main.swift").read_text().split("let app = NSApplication.shared", 1)[0]
         source = source.replace("final class Sorter:", "class Sorter:")
         harness = r'''
 class TestSorter: Sorter {
@@ -67,7 +69,7 @@ assert(sorter.genreLabel.toolTip == nil)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_resources_for_development_and_release_builds(self):
-        source = Path(__file__).with_name("main.swift").read_text().split("let app = NSApplication.shared", 1)[0]
+        source = (APP / "main.swift").read_text().split("let app = NSApplication.shared", 1)[0]
         harness = r'''
 let root = URL(fileURLWithPath: CommandLine.arguments[1])
 let fm = FileManager.default
@@ -133,7 +135,7 @@ assert(current.string(forKey: "source") == nil)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_genre_column_loads_lazily_and_caches(self):
-        source = Path(__file__).with_name("main.swift").read_text().split("let app = NSApplication.shared", 1)[0]
+        source = (APP / "main.swift").read_text().split("let app = NSApplication.shared", 1)[0]
         source = source.replace("final class Sorter:", "class Sorter:")
         harness = r'''
 class TestSorter: Sorter {
@@ -181,7 +183,7 @@ assert(sorter.reads.count == 4 && sorter.genreCache[sorter.files[0]] == "House |
         import math
         import struct
         import wave
-        source = Path(__file__).with_name("main.swift").read_text().split("let app = NSApplication.shared", 1)[0]
+        source = (APP / "main.swift").read_text().split("let app = NSApplication.shared", 1)[0]
         source = source.replace("final class Sorter:", "class Sorter:")
         harness = r'''
 let app = NSApplication.shared
@@ -250,7 +252,7 @@ for current in [[], levels] {
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_targeted_recheck_failure_retains_rows_without_full_scan(self):
-        source = Path(__file__).with_name("main.swift").read_text().split("let app = NSApplication.shared", 1)[0]
+        source = (APP / "main.swift").read_text().split("let app = NSApplication.shared", 1)[0]
         source = source.replace("final class Sorter:", "class Sorter:")
         harness = r'''
 class TestSorter: Sorter {
@@ -304,7 +306,7 @@ for mode in 0...2 {
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_check_activity_and_selection_explanation(self):
-        source = Path(__file__).with_name("main.swift").read_text().split("let app = NSApplication.shared", 1)[0]
+        source = (APP / "main.swift").read_text().split("let app = NSApplication.shared", 1)[0]
         source = source.replace("final class Sorter:", "class Sorter:")
         harness = r'''
 class TestSorter: Sorter {
@@ -358,7 +360,7 @@ for fail in [false, true] {
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_repair_confirmation_selection_background_gate_and_targeted_recheck(self):
-        source = Path(__file__).with_name("main.swift").read_text().split("let app = NSApplication.shared", 1)[0]
+        source = (APP / "main.swift").read_text().split("let app = NSApplication.shared", 1)[0]
         source = source.replace("final class Sorter:", "class Sorter:")
         # Exercise the real confirmation construction without displaying a modal UI.
         source = source.replace("guard alert.runModal() == .alertSecondButtonReturn else { return }\n        startRepair(findings)",
@@ -488,7 +490,7 @@ assert(sorter.actions == ["repair-genres", "recheck-genres", "lint"])
 assert(sorter.scannedRoot?.path == sorter.configuration.destinationRoot)
 assert(controller.issues.isEmpty)
 '''
-        from test_formats import fixture
+        from .test_formats import fixture
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             fixture(root / "fixture.wav")
@@ -499,7 +501,7 @@ assert(controller.issues.isEmpty)
 
     @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg unavailable")
     def test_discovery_playback_and_refresh_all_formats(self):
-        source = Path(__file__).with_name("main.swift").read_text()
+        source = (APP / "main.swift").read_text()
         load = "func loadFolder(" + source.split("    func loadFolder(", 1)[1].split("    func numberOfRows", 1)[0]
         select = "func select(" + source.split("    func select(", 1)[1].split("    func highlight()", 1)[0]
         refresh = "func refreshFolder()" + source.split("    @objc func refreshFolder()", 1)[1].split("    func loadFolder(", 1)[0]
@@ -596,8 +598,8 @@ assert(sorter.errors == 0)
 
     def test_real_format_move_tag_undo_and_rollback(self):
         from comments import AudioMetadata, genre_values, read_comment
-        from test_formats import fixture, rich_tags
-        source = Path(__file__).with_name("main.swift").read_text()
+        from .test_formats import fixture, rich_tags
+        source = (APP / "main.swift").read_text()
         move = "func moveTaggedFile(" + source.split("    func moveTaggedFile(", 1)[1].split("    func move(_ destination:", 1)[0]
         harness = '''
 import Foundation
@@ -663,7 +665,7 @@ assert(afterRollbackCollision == before)
                 before = AudioMetadata(original)
                 script = root / "main.swift"
                 script.write_text(harness)
-                result = subprocess.run(["swift", str(script), directory, sys.executable, str(Path(__file__).with_name("comments.py")), str(original), str(target)], capture_output=True, text=True)
+                result = subprocess.run(["swift", str(script), directory, sys.executable, str(APP / "comments.py"), str(original), str(target)], capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertEqual(genre_values(target), ([], None))
                 self.assertEqual(read_comment(target), "Comment after move")
@@ -674,7 +676,7 @@ assert(afterRollbackCollision == before)
                     self.assertEqual([p for p in after.parts if p[0] in (b"data", b"SSND")], [p for p in before.parts if p[0] in (b"data", b"SSND")])
 
     def test_trash_confirmation_and_context_target(self):
-        source = Path(__file__).with_name("main.swift").read_text()
+        source = (APP / "main.swift").read_text()
         confirm = source.split("    @objc func confirmTrash(", 1)[1].split("    func sendToTrash(", 1)[0]
         harness = '''
 import Foundation
@@ -746,7 +748,7 @@ assert(sorter.trashed.count == 2)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_trash_queue_updates_and_failures(self):
-        source = Path(__file__).with_name("main.swift").read_text()
+        source = (APP / "main.swift").read_text()
         trash = source.split("    @discardableResult func trashFile(", 1)[1].split("    // Move first", 1)[0]
         harness = '''
 import Foundation
@@ -855,7 +857,7 @@ for url in urls { assert(FileManager.default.fileExists(atPath: url.path)) }
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_command_playback_shortcuts_in_both_focus_states(self):
-        source = Path(__file__).with_name("main.swift").read_text()
+        source = (APP / "main.swift").read_text()
         command = source.split("        if flags.contains(.command) {", 1)[1].split("            if let number = Int(key)", 1)[0]
         harness = '''
 import Cocoa
@@ -915,7 +917,7 @@ assert(offsets == [-5, 5, -30, 30])
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_show_in_finder(self):
-        source = Path(__file__).with_name("main.swift").read_text()
+        source = (APP / "main.swift").read_text()
         reveal = source.split("    @objc func showInFinder(", 1)[1].split("    func refreshDestinations()", 1)[0]
         harness = '''
 class Menu {}
@@ -972,7 +974,7 @@ assert(Workspace.shared.revealed == [second])
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_configuration_and_move_rollback(self):
-        source = Path(__file__).with_name("main.swift").read_text()
+        source = (APP / "main.swift").read_text()
         configuration = source.split("struct Destination:", 1)[1].split("final class Sorter:", 1)[0]
         move = source.split("    func moveTaggedFile(", 1)[1].split("    func move(_ destination:", 1)[0]
         harness = '''
@@ -1065,7 +1067,7 @@ assert(mover.calls == calls)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_bar_edit_model_cut_duplicate_undo_and_regrid(self):
-        source = Path(__file__).with_name("main.swift").read_text().split("let app = NSApplication.shared", 1)[0]
+        source = (APP / "main.swift").read_text().split("let app = NSApplication.shared", 1)[0]
         harness = r'''
 // 120 BPM: two-second bars, first downbeat at 0.5 s, 21-second track.
 let duration = 21.0
@@ -1152,7 +1154,7 @@ assert(samples == (0..<100).map { Metronome.click(at: 0.25 + Double($0) / 44_100
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_memory_cues_through_cut_duplicate_undo_and_regrid(self):
-        source = Path(__file__).with_name("main.swift").read_text().split("let app = NSApplication.shared", 1)[0]
+        source = (APP / "main.swift").read_text().split("let app = NSApplication.shared", 1)[0]
         harness = r'''
 func close(_ a: [Double], _ b: [Double]) -> Bool { a.count == b.count && zip(a, b).allSatisfy { abs($0 - $1) < 1e-9 } }
 // 120 BPM: two-second bars, first downbeat at 0.5 s, 21-second track.
@@ -1234,7 +1236,7 @@ do { _ = try empty.removeCue(nearest: 1, duration: duration); fatalError("Expect
         import math
         import struct
         import wave
-        source = Path(__file__).with_name("main.swift").read_text().split("let app = NSApplication.shared", 1)[0]
+        source = (APP / "main.swift").read_text().split("let app = NSApplication.shared", 1)[0]
         source = source.replace("final class Sorter:", "class Sorter:")
         harness = r'''
 // The real Python helper, run from the repository rather than the app bundle.
@@ -1506,7 +1508,7 @@ assert(editor.status.stringValue.hasPrefix("Recorded Plain.wav for Rekordbox"), 
                 write_bpm(root / name, 120)
             script = root / "main.swift"
             script.write_text(source + harness)
-            helper = str(Path(__file__).with_name("comments.py"))
+            helper = str(APP / "comments.py")
             result = subprocess.run(["swift", str(script), directory, sys.executable, helper], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
@@ -1514,7 +1516,7 @@ assert(editor.status.stringValue.hasPrefix("Recorded Plain.wav for Rekordbox"), 
         import math
         import struct
         import wave
-        source = Path(__file__).with_name("main.swift").read_text().split("let app = NSApplication.shared", 1)[0]
+        source = (APP / "main.swift").read_text().split("let app = NSApplication.shared", 1)[0]
         source = source.replace("final class Sorter:", "class Sorter:")
         harness = r'''
 // A stand-in detector: checks what the editor sends and answers like detect.py.
@@ -1652,7 +1654,7 @@ assert(sorter.requests.count == 6 && editor.session.grid == BeatGrid(bpm: 124.5,
         import math
         import struct
         import wave
-        source = Path(__file__).with_name("main.swift").read_text().split("let app = NSApplication.shared", 1)[0]
+        source = (APP / "main.swift").read_text().split("let app = NSApplication.shared", 1)[0]
         source = source.replace("final class Sorter:", "class Sorter:")
         harness = r'''
 // The real Python helper, run from the repository rather than the app bundle.
@@ -1917,6 +1919,6 @@ assert(key("\\", 42, .command) && editor.status.stringValue.hasPrefix("Downbeat 
             # The WAV has no BPM tag; 120 is the editor's default.
             script = root / "main.swift"
             script.write_text(source + harness)
-            helper = str(Path(__file__).with_name("comments.py"))
+            helper = str(APP / "comments.py")
             result = subprocess.run(["swift", str(script), directory, sys.executable, helper], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from mutagen.id3 import ID3, TCON
 
+from . import APP
 from comments import lint_destinations
 
 
@@ -100,7 +101,7 @@ class LintTests(unittest.TestCase):
     def test_cli_returns_report(self):
         self.track("good.mp3", ["Breaks"])
         completed = subprocess.run(
-            [sys.executable, str(Path(__file__).with_name("comments.py")), "lint", str(self.root)],
+            [sys.executable, str(APP / "comments.py"), "lint", str(self.root)],
             input=json.dumps({"destinations": self.destinations}), capture_output=True, text=True,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)

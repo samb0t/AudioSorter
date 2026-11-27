@@ -13,6 +13,7 @@ import wave
 
 from mutagen.id3 import APIC, COMM, ID3, PRIV, TCON, TIT2
 
+from . import APP
 from comments import (AudioMetadata, TagBlock, chunk, genre_values,
                       lint_destinations, read_comment, synchsafe, write_comment, write_genre)
 
@@ -73,7 +74,7 @@ class FormatTests(unittest.TestCase):
                         tags.add(TCON(encoding=3, text=["House", "Deep House"]))
                     fixture(path, tags, [(b"IGNR", b"Breaks\0")] if extension == ".wav" and present else ())
                     before = path.read_bytes()
-                    result = subprocess.run([sys.executable, str(Path(__file__).with_name("comments.py")), "read-genre", str(path)], capture_output=True, text=True)
+                    result = subprocess.run([sys.executable, str(APP / "comments.py"), "read-genre", str(path)], capture_output=True, text=True)
                     self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
                     data = json.loads(result.stdout)
                     # The container fixture uses ID3v2.3, which joins values with '/'.

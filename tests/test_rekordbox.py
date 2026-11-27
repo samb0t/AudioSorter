@@ -16,6 +16,7 @@ import xml.etree.ElementTree as ElementTree
 
 from mutagen.id3 import ID3, TIT2, TPE1, TCON
 
+from . import APP
 import rekordbox
 from comments import chunk
 
@@ -243,7 +244,7 @@ class ExportTests(unittest.TestCase):
         store_path = self.root / "grids.json"
         store_path.write_text(json.dumps(self.store([wav_path])))
         output = self.root / "Rekordbox out" / "rekordbox.xml"
-        helper = Path(__file__).with_name("comments.py")
+        helper = APP / "comments.py"
         result = subprocess.run([sys.executable, str(helper), "rekordbox-xml", str(store_path)],
                                 input=json.dumps({"output": str(output)}), capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

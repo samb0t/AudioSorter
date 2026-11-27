@@ -12,6 +12,7 @@ import unittest
 
 from mutagen.id3 import APIC, GEOB, ID3, PRIV, TBPM, TIT2, TLEN
 
+from . import APP
 from comments import AudioMetadata, chunk
 from edit import Layout, bpm_text, cut_file, read_bpm, write_bpm
 
@@ -205,7 +206,7 @@ class EditTests(unittest.TestCase):
     def test_cli_reports_errors_as_json(self):
         source = self.root / "track.wav"
         wav(source)
-        script = str(Path(__file__).with_name("comments.py"))
+        script = str(APP / "comments.py")
         request = json.dumps({"segments": [[0, 100], [200, 400]], "fade": FADE, "output": str(self.root / "track - Edit.wav")})
         result = subprocess.run([sys.executable, script, "cut", str(source)], input=request, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -276,7 +277,7 @@ class EditTests(unittest.TestCase):
     def test_write_bpm_cli(self):
         path = self.root / "plain.aiff"
         aiff(path)
-        script = str(Path(__file__).with_name("comments.py"))
+        script = str(APP / "comments.py")
         result = subprocess.run([sys.executable, script, "write-bpm", str(path)], input='{"bpm": 124}', capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         read = subprocess.run([sys.executable, script, "read-bpm", str(path)], capture_output=True, text=True)
